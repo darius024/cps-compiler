@@ -10,12 +10,15 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import kotlin.test.assertIs
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class MiniKotlinCompilerTest {
 
     @TempDir
     lateinit var tempDir: Path
+
+    // -- Test harness ---------------------------------------------------------
 
     private fun parseString(source: String): MiniKotlinParser.ProgramContext {
         val input = CharStreams.fromString(source)
@@ -42,6 +45,34 @@ class MiniKotlinCompilerTest {
         }
         return null
     }
+
+    /** Compiles MiniKotlin source to Java, compiles the Java, runs it, returns stdout. */
+    private fun compileAndRun(source: String): String {
+        val program = parseString(source)
+        val compiler = MiniKotlinCompiler()
+        val javaCode = compiler.compile(program)
+
+        val javaFile = tempDir.resolve("MiniProgram.java")
+        Files.writeString(javaFile, javaCode)
+
+        val javaCompiler = JavaRuntimeCompiler()
+        val stdlibPath = resolveStdlibPath()
+        val (compilationResult, executionResult) = javaCompiler.compileAndExecute(javaFile, stdlibPath)
+
+        assertIs<CompilationResult.Success>(compilationResult, "Java compilation failed: $compilationResult")
+        assertIs<ExecutionResult.Success>(executionResult, "Java execution failed: $executionResult")
+        return executionResult.stdout
+    }
+
+    // -- Empty main -----------------------------------------------------------
+
+    @Test
+    fun `empty main compiles and runs with no output`() {
+        val output = compileAndRun("fun main(): Unit { }")
+        assertEquals("", output)
+    }
+
+    // -- Integration (existing) -----------------------------------------------
 
     @Test
     fun `compile example_mini outputs 120 and 15`() {
