@@ -217,6 +217,60 @@ class MiniKotlinCompilerTest {
         """))
     }
 
+    // -- Variable declarations and statement sequencing -------------------------
+
+    @Test
+    fun `variable declaration with simple expression`() {
+        assertEquals("42\n", compileAndRun("""
+            fun main(): Unit {
+                var x: Int = 42
+                println(x)
+            }
+        """))
+    }
+
+    @Test
+    fun `variable declaration with arithmetic`() {
+        assertEquals("5\n", compileAndRun("""
+            fun main(): Unit {
+                var x: Int = 2 + 3
+                println(x)
+            }
+        """))
+    }
+
+    @Test
+    fun `multiple variables used in expression`() {
+        assertEquals("15\n", compileAndRun("""
+            fun main(): Unit {
+                var a: Int = 5
+                var b: Int = 10
+                println(a + b)
+            }
+        """))
+    }
+
+    @Test
+    fun `multiple sequential println calls`() {
+        assertEquals("1\n2\n3\n", compileAndRun("""
+            fun main(): Unit {
+                println(1)
+                println(2)
+                println(3)
+            }
+        """))
+    }
+
+    @Test
+    fun `boolean variable used in println`() {
+        assertEquals("true\n", compileAndRun("""
+            fun main(): Unit {
+                var b: Boolean = 3 > 2
+                println(b)
+            }
+        """))
+    }
+
     // -- Integration (existing) -----------------------------------------------
 
     @Test
