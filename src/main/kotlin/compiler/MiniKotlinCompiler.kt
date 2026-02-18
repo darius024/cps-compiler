@@ -101,6 +101,41 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
     private fun compileExpression(expr: ExpressionContext): String = when (expr) {
         is PrimaryExprContext -> compilePrimary(expr.primary())
+        is AddSubExprContext -> {
+            val op = if (expr.PLUS() != null) "+" else "-"
+            "(${compileExpression(expr.expression(0))} $op ${compileExpression(expr.expression(1))})"
+        }
+        is MulDivExprContext -> {
+            val op = when {
+                expr.MULT() != null -> "*"
+                expr.DIV() != null  -> "/"
+                else                -> "%"
+            }
+            "(${compileExpression(expr.expression(0))} $op ${compileExpression(expr.expression(1))})"
+        }
+        is ComparisonExprContext -> {
+            val op = when {
+                expr.LT() != null -> "<"
+                expr.GT() != null -> ">"
+                expr.LE() != null -> "<="
+                else              -> ">="
+            }
+            "(${compileExpression(expr.expression(0))} $op ${compileExpression(expr.expression(1))})"
+        }
+        is EqualityExprContext -> {
+            val left = compileExpression(expr.expression(0))
+            val right = compileExpression(expr.expression(1))
+            if (expr.EQ() != null)
+                "java.util.Objects.equals($left, $right)"
+            else
+                "!java.util.Objects.equals($left, $right)"
+        }
+        is AndExprContext ->
+            "(${compileExpression(expr.expression(0))} && ${compileExpression(expr.expression(1))})"
+        is OrExprContext ->
+            "(${compileExpression(expr.expression(0))} || ${compileExpression(expr.expression(1))})"
+        is NotExprContext ->
+            "(!${compileExpression(expr.expression())})"
         else -> TODO("expression type: ${expr::class.simpleName}")
     }
 

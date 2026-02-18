@@ -104,6 +104,119 @@ class MiniKotlinCompilerTest {
         assertEquals("true\n", output)
     }
 
+    // -- Arithmetic operators -------------------------------------------------
+
+    @Test
+    fun `addition`() {
+        assertEquals("5\n", compileAndRun("""
+            fun main(): Unit { println(2 + 3) }
+        """))
+    }
+
+    @Test
+    fun `subtraction`() {
+        assertEquals("7\n", compileAndRun("""
+            fun main(): Unit { println(10 - 3) }
+        """))
+    }
+
+    @Test
+    fun `multiplication`() {
+        assertEquals("20\n", compileAndRun("""
+            fun main(): Unit { println(4 * 5) }
+        """))
+    }
+
+    @Test
+    fun `integer division truncates toward zero`() {
+        assertEquals("3\n", compileAndRun("""
+            fun main(): Unit { println(10 / 3) }
+        """))
+    }
+
+    @Test
+    fun `modulo`() {
+        assertEquals("1\n", compileAndRun("""
+            fun main(): Unit { println(10 % 3) }
+        """))
+    }
+
+    @Test
+    fun `nested arithmetic with parentheses`() {
+        assertEquals("5\n", compileAndRun("""
+            fun main(): Unit { println(((1 + 2) * 3) - 4) }
+        """))
+    }
+
+    // -- Comparison operators -------------------------------------------------
+
+    @Test
+    fun `greater than`() {
+        assertEquals("true\n", compileAndRun("""
+            fun main(): Unit { println(3 > 2) }
+        """))
+    }
+
+    @Test
+    fun `less than`() {
+        assertEquals("true\n", compileAndRun("""
+            fun main(): Unit { println(2 < 3) }
+        """))
+    }
+
+    @Test
+    fun `greater than or equal`() {
+        assertEquals("true\n", compileAndRun("""
+            fun main(): Unit { println(3 >= 3) }
+        """))
+    }
+
+    @Test
+    fun `less than or equal`() {
+        assertEquals("false\n", compileAndRun("""
+            fun main(): Unit { println(5 <= 3) }
+        """))
+    }
+
+    // -- Equality operators ---------------------------------------------------
+
+    @Test
+    fun `equality on integers`() {
+        assertEquals("true\n", compileAndRun("""
+            fun main(): Unit { println(1 == 1) }
+        """))
+    }
+
+    @Test
+    fun `inequality on integers`() {
+        assertEquals("true\n", compileAndRun("""
+            fun main(): Unit { println(1 != 2) }
+        """))
+    }
+
+    // -- Logical operators ----------------------------------------------------
+
+    @Test
+    fun `logical and`() {
+        assertEquals("false\n", compileAndRun("""
+            fun main(): Unit { println(true && false) }
+        """))
+    }
+
+    @Test
+    fun `logical or`() {
+        assertEquals("true\n", compileAndRun("""
+            fun main(): Unit { println(true || false) }
+        """))
+    }
+
+    @Test
+    fun `logical not`() {
+        assertEquals("false\n", compileAndRun("""
+            fun main(): Unit { println(!true) }
+        """))
+    }
+
     // -- Integration (existing) -----------------------------------------------
 
     @Test
