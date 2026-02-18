@@ -72,6 +72,38 @@ class MiniKotlinCompilerTest {
         assertEquals("", output)
     }
 
+    // -- Println with literals ------------------------------------------------
+
+    @Test
+    fun `println string literal`() {
+        val output = compileAndRun("""
+            fun main(): Unit {
+                println("hello")
+            }
+        """)
+        assertEquals("hello\n", output)
+    }
+
+    @Test
+    fun `println integer literal`() {
+        val output = compileAndRun("""
+            fun main(): Unit {
+                println(42)
+            }
+        """)
+        assertEquals("42\n", output)
+    }
+
+    @Test
+    fun `println boolean literal`() {
+        val output = compileAndRun("""
+            fun main(): Unit {
+                println(true)
+            }
+        """)
+        assertEquals("true\n", output)
+    }
+
     // -- Integration (existing) -----------------------------------------------
 
     @Test
