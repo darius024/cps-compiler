@@ -65,6 +65,16 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         val rest = stmts.subList(1, stmts.size)
         val pad = "  ".repeat(indent)
 
+        val varDecl = stmt.variableDeclaration()
+        if (varDecl != null) {
+            val type = mapType(varDecl.type())
+            val name = varDecl.IDENTIFIER().text
+            val value = compileExpression(varDecl.expression())
+            out.appendLine("${pad}$type $name = $value;")
+            compileStatements(rest, indent, out)
+            return
+        }
+
         val expr = stmt.expression()
         if (expr != null && expr is FunctionCallExprContext) {
             compileFunctionCallStatement(expr, rest, indent, out)
@@ -95,6 +105,16 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         } else {
             TODO("call to user function: $name")
         }
+    }
+
+    // -- Type mapping ---------------------------------------------------------
+
+    private fun mapType(type: TypeContext): String = when {
+        type.INT_TYPE() != null     -> "Integer"
+        type.STRING_TYPE() != null  -> "String"
+        type.BOOLEAN_TYPE() != null -> "Boolean"
+        type.UNIT_TYPE() != null    -> "Void"
+        else -> error("unknown type: ${type.text}")
     }
 
     // -- Expression compilation (simple, no function calls) -------------------
