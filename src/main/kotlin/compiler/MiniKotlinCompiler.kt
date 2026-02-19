@@ -17,15 +17,26 @@ import MiniKotlinParser.*
 
 class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
+    /** Counter for generating unique continuation parameter names (arg0, arg1, …). */
     private var argCounter = 0
+
+    /** Counter for generating unique loop continuation names (__loop_0, __loop_1, …). */
     private var loopCounter = 0
+
+    /**
+     * Variables in the current function that are targets of assignment statements.
+     * These must be wrapped in single-element arrays so that Java lambdas can
+     * mutate them (Java requires captured locals to be effectively final).
+     */
     private var reassignedVariables = emptySet<String>()
 
     private fun freshArg(): String = "arg${argCounter++}"
+
     private fun freshLoop(): String = "__loop_${loopCounter++}"
 
     // -- Entry point ----------------------------------------------------------
 
+    /** Compiles a complete MiniKotlin program into a single Java class with CPS-transformed functions. */
     fun compile(program: ProgramContext, className: String = "MiniProgram"): String {
         argCounter = 0
         loopCounter = 0
@@ -41,6 +52,11 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
     // -- Function compilation -------------------------------------------------
 
+    /**
+     * Compiles a single function declaration. `main` becomes Java's standard
+     * entry point; all other functions receive an extra [Continuation] parameter
+     * and use it to deliver their return value instead of returning directly.
+     */
     private fun compileFunction(function: FunctionDeclarationContext, indent: Int, out: StringBuilder) {
         val name = function.IDENTIFIER().text
         val pad = "  ".repeat(indent)
@@ -60,6 +76,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
             out.appendLine("${pad}public static void $name(${params.joinToString(", ")}) {")
         }
 
+        // Non-main functions that fall through without a return must still call their continuation.
         val implicitReturn: ((Int) -> Unit)? = if (name != "main") { innerIndent ->
             val pad = "  ".repeat(innerIndent)
             out.appendLine("${pad}__continuation.accept(null);")
@@ -69,7 +86,10 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         out.appendLine("${pad}}")
     }
 
-    /** Collects names of all variables that appear as assignment targets. */
+    /**
+     * Collects names of all variables that appear as assignment targets anywhere
+     * in the function body, including inside nested if/while blocks.
+     */
     private fun collectReassignedVariables(stmts: List<StatementContext>): Set<String> {
         val result = mutableSetOf<String>()
         fun walk(stmts: List<StatementContext>) {
@@ -130,6 +150,11 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
     // -- Variable declarations ------------------------------------------------
 
+    /**
+     * Compiles a `var` declaration. If the variable is reassigned elsewhere in
+     * the function, it is emitted as a single-element array to allow mutation
+     * from inside Java lambdas.
+     */
     private fun compileVariableDeclaration(
         decl: VariableDeclarationContext,
         rest: List<StatementContext>,
@@ -154,6 +179,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
     // -- Variable assignment --------------------------------------------------
 
+    /** Compiles a variable reassignment, writing to `name[0]` for wrapped variables. */
     private fun compileAssignment(
         assign: VariableAssignmentContext,
         rest: List<StatementContext>,
@@ -177,6 +203,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
     // -- Return ---------------------------------------------------------------
 
+    /** Compiles a return statement by passing the value to `__continuation`. Subsequent statements are dead code. */
     private fun compileReturn(ret: ReturnStatementContext, indent: Int, out: StringBuilder) {
         val expr = ret.expression()
         if (expr == null) {
@@ -265,6 +292,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
     // -- Expression statements ------------------------------------------------
 
+    /** Compiles a bare expression used as a statement (e.g. a standalone function call). */
     private fun compileExpressionStatement(
         expr: ExpressionContext,
         rest: List<StatementContext>,
@@ -294,6 +322,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
     // compiles directly. For calls it emits CPS code and passes the temp
     // variable (and updated indent) into the [then] callback.
 
+    /** Recursively checks whether an expression tree contains any function call. */
     private fun containsFunctionCall(expr: ExpressionContext): Boolean = when (expr) {
         is FunctionCallExprContext -> true
         is PrimaryExprContext -> {
@@ -370,6 +399,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
                     }
                 }
             }
+            // Short-circuit: branch to avoid eagerly evaluating the RHS when it has calls.
             is AndExprContext -> {
                 val leftExpr = expr.expression(0)
                 val rightExpr = expr.expression(1)
@@ -425,6 +455,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         }
     }
 
+    /** Lifts both operands of a binary operator left-to-right, then combines them. */
     private fun liftBinaryOperation(
         left: ExpressionContext,
         right: ExpressionContext,
@@ -461,6 +492,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
     // -- Type mapping ---------------------------------------------------------
 
+    /** Maps a MiniKotlin type to its boxed Java equivalent (needed for generics). */
     private fun toJavaType(type: TypeContext): String = when {
         type.INT_TYPE() != null     -> "Integer"
         type.STRING_TYPE() != null  -> "String"
@@ -471,6 +503,11 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
     // -- Expression compilation (simple, no function calls) -------------------
 
+    /**
+     * Compiles an expression that is guaranteed to contain no function calls
+     * into a single Java expression string. Throws if a function call is
+     * encountered — use [liftExpression] for expressions that may contain calls.
+     */
     private fun compileExpression(expr: ExpressionContext): String = when (expr) {
         is PrimaryExprContext -> compilePrimary(expr.primary())
         is AddSubExprContext -> compileBinaryOperation(expr.expression(0), expr.expression(1),
@@ -501,9 +538,11 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         else -> error("unsupported expression: ${expr::class.simpleName}")
     }
 
+    /** Compiles a simple binary operation into a parenthesized Java expression. */
     private fun compileBinaryOperation(left: ExpressionContext, right: ExpressionContext, op: String): String =
         "(${compileExpression(left)} $op ${compileExpression(right)})"
 
+    /** Compiles a primary expression (literal, identifier, or parenthesized sub-expression). */
     private fun compilePrimary(primary: PrimaryContext): String = when (primary) {
         is IntLiteralContext -> primary.INTEGER_LITERAL().text
         is StringLiteralContext -> primary.STRING_LITERAL().text
