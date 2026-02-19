@@ -40,14 +40,16 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
     fun compile(program: ProgramContext, className: String = "MiniProgram"): String {
         argCounter = 0
         loopCounter = 0
-        return buildString {
-            appendLine("public class $className {")
+        val w = CodeWriter()
+        w.line("public class $className {")
+        w.indented {
             for (function in program.functionDeclaration()) {
-                appendLine()
-                compileFunction(function, indent = 1, this)
+                w.blankLine()
+                compileFunction(function, w)
             }
-            appendLine("}")
         }
+        w.line("}")
+        return w.toString()
     }
 
     // -- Function compilation -------------------------------------------------
@@ -57,14 +59,13 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
      * entry point; all other functions receive an extra [Continuation] parameter
      * and use it to deliver their return value instead of returning directly.
      */
-    private fun compileFunction(function: FunctionDeclarationContext, indent: Int, out: StringBuilder) {
+    private fun compileFunction(function: FunctionDeclarationContext, w: CodeWriter) {
         val name = function.IDENTIFIER().text
-        val pad = "  ".repeat(indent)
 
         reassignedVariables = collectReassignedVariables(function.block().statement())
 
         if (name == "main") {
-            out.appendLine("${pad}public static void main(String[] args) {")
+            w.line("public static void main(String[] args) {")
         } else {
             val returnType = toJavaType(function.type())
             val params = buildList {
@@ -73,17 +74,16 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
                 }
                 add("Continuation<$returnType> __continuation")
             }
-            out.appendLine("${pad}public static void $name(${params.joinToString(", ")}) {")
+            w.line("public static void $name(${params.joinToString(", ")}) {")
         }
 
         // Non-main functions that fall through without a return must still call their continuation.
-        val implicitReturn: ((Int) -> Unit)? = if (name != "main") { innerIndent ->
-            val pad = "  ".repeat(innerIndent)
-            out.appendLine("${pad}__continuation.accept(null);")
+        val implicitReturn: (() -> Unit)? = if (name != "main") {
+            { w.line("__continuation.accept(null);") }
         } else null
 
-        compileStatements(function.block().statement(), indent + 1, out, implicitReturn)
-        out.appendLine("${pad}}")
+        w.indented { compileStatements(function.block().statement(), w, implicitReturn) }
+        w.line("}")
     }
 
     /**
@@ -118,12 +118,11 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
      */
     private fun compileStatements(
         stmts: List<StatementContext>,
-        indent: Int,
-        out: StringBuilder,
-        onEmpty: ((indent: Int) -> Unit)? = null,
+        w: CodeWriter,
+        onEmpty: (() -> Unit)? = null,
     ) {
         if (stmts.isEmpty()) {
-            onEmpty?.invoke(indent)
+            onEmpty?.invoke()
             return
         }
 
@@ -132,17 +131,17 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
         when {
             stmt.variableDeclaration() != null ->
-                compileVariableDeclaration(stmt.variableDeclaration(), rest, indent, out, onEmpty)
+                compileVariableDeclaration(stmt.variableDeclaration(), rest, w, onEmpty)
             stmt.variableAssignment() != null ->
-                compileAssignment(stmt.variableAssignment(), rest, indent, out, onEmpty)
+                compileAssignment(stmt.variableAssignment(), rest, w, onEmpty)
             stmt.returnStatement() != null ->
-                compileReturn(stmt.returnStatement(), indent, out)
+                compileReturn(stmt.returnStatement(), w)
             stmt.ifStatement() != null ->
-                compileIf(stmt.ifStatement(), rest, indent, out, onEmpty)
+                compileIf(stmt.ifStatement(), rest, w, onEmpty)
             stmt.whileStatement() != null ->
-                compileWhile(stmt.whileStatement(), rest, indent, out, onEmpty)
+                compileWhile(stmt.whileStatement(), rest, w, onEmpty)
             stmt.expression() != null ->
-                compileExpressionStatement(stmt.expression(), rest, indent, out, onEmpty)
+                compileExpressionStatement(stmt.expression(), rest, w, onEmpty)
             else ->
                 error("unsupported statement: ${stmt.text}")
         }
@@ -158,22 +157,20 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
     private fun compileVariableDeclaration(
         decl: VariableDeclarationContext,
         rest: List<StatementContext>,
-        indent: Int,
-        out: StringBuilder,
-        onEmpty: ((Int) -> Unit)?,
+        w: CodeWriter,
+        onEmpty: (() -> Unit)?,
     ) {
         val type = toJavaType(decl.type())
         val name = decl.IDENTIFIER().text
         val rhs = decl.expression()
 
-        liftExpression(rhs, indent, out) { value, innerIndent ->
-            val pad = "  ".repeat(innerIndent)
+        liftExpression(rhs, w) { value ->
             if (isReassigned(name)) {
-                out.appendLine("${pad}$type[] $name = {$value};")
+                w.line("$type[] $name = {$value};")
             } else {
-                out.appendLine("${pad}$type $name = $value;")
+                w.line("$type $name = $value;")
             }
-            compileStatements(rest, innerIndent, out, onEmpty)
+            compileStatements(rest, w, onEmpty)
         }
     }
 
@@ -183,40 +180,36 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
     private fun compileAssignment(
         assign: VariableAssignmentContext,
         rest: List<StatementContext>,
-        indent: Int,
-        out: StringBuilder,
-        onEmpty: ((Int) -> Unit)?,
+        w: CodeWriter,
+        onEmpty: (() -> Unit)?,
     ) {
         val name = assign.IDENTIFIER().text
         val rhs = assign.expression()
 
-        liftExpression(rhs, indent, out) { value, innerIndent ->
-            val pad = "  ".repeat(innerIndent)
+        liftExpression(rhs, w) { value ->
             if (isReassigned(name)) {
-                out.appendLine("${pad}$name[0] = $value;")
+                w.line("$name[0] = $value;")
             } else {
-                out.appendLine("${pad}$name = $value;")
+                w.line("$name = $value;")
             }
-            compileStatements(rest, innerIndent, out, onEmpty)
+            compileStatements(rest, w, onEmpty)
         }
     }
 
     // -- Return ---------------------------------------------------------------
 
     /** Compiles a return statement by passing the value to `__continuation`. Subsequent statements are dead code. */
-    private fun compileReturn(ret: ReturnStatementContext, indent: Int, out: StringBuilder) {
+    private fun compileReturn(ret: ReturnStatementContext, w: CodeWriter) {
         val expr = ret.expression()
         if (expr == null) {
-            val pad = "  ".repeat(indent)
-            out.appendLine("${pad}__continuation.accept(null);")
-            out.appendLine("${pad}return;")
+            w.line("__continuation.accept(null);")
+            w.line("return;")
             return
         }
 
-        liftExpression(expr, indent, out) { value, innerIndent ->
-            val pad = "  ".repeat(innerIndent)
-            out.appendLine("${pad}__continuation.accept($value);")
-            out.appendLine("${pad}return;")
+        liftExpression(expr, w) { value ->
+            w.line("__continuation.accept($value);")
+            w.line("return;")
         }
     }
 
@@ -230,23 +223,21 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
     private fun compileIf(
         ifStmt: IfStatementContext,
         rest: List<StatementContext>,
-        indent: Int,
-        out: StringBuilder,
-        onEmpty: ((Int) -> Unit)?,
+        w: CodeWriter,
+        onEmpty: (() -> Unit)?,
     ) {
         val condition = ifStmt.expression()
         val blocks = ifStmt.block()
 
-        liftExpression(condition, indent, out) { cond, condIndent ->
-            val pad = "  ".repeat(condIndent)
-            out.appendLine("${pad}if ($cond) {")
-            compileStatements(blocks[0].statement() + rest, condIndent + 1, out, onEmpty)
-            out.appendLine("${pad}}")
+        liftExpression(condition, w) { cond ->
+            w.line("if ($cond) {")
+            w.indented { compileStatements(blocks[0].statement() + rest, w, onEmpty) }
+            w.line("}")
 
             val elseBody = if (blocks.size > 1) blocks[1].statement() + rest else rest
-            out.appendLine("${pad}else {")
-            compileStatements(elseBody, condIndent + 1, out, onEmpty)
-            out.appendLine("${pad}}")
+            w.line("else {")
+            w.indented { compileStatements(elseBody, w, onEmpty) }
+            w.line("}")
         }
     }
 
@@ -260,34 +251,32 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
     private fun compileWhile(
         whileStmt: WhileStatementContext,
         rest: List<StatementContext>,
-        indent: Int,
-        out: StringBuilder,
-        onEmpty: ((Int) -> Unit)?,
+        w: CodeWriter,
+        onEmpty: (() -> Unit)?,
     ) {
-        val pad = "  ".repeat(indent)
         val loopVar = freshLoop()
         val loopParameter = freshArg()
         val condition = whileStmt.expression()
         val body = whileStmt.block().statement()
 
-        out.appendLine("${pad}Continuation<Void>[] $loopVar = new Continuation[1];")
-        out.appendLine("${pad}$loopVar[0] = ($loopParameter) -> {")
+        w.line("Continuation<Void>[] $loopVar = new Continuation[1];")
+        w.line("$loopVar[0] = ($loopParameter) -> {")
 
-        liftExpression(condition, indent + 1, out) { cond, condIndent ->
-            val pad = "  ".repeat(condIndent)
-            out.appendLine("${pad}if ($cond) {")
-            compileStatements(body, condIndent + 1, out) { loopBackIndent ->
-                val pad = "  ".repeat(loopBackIndent)
-                out.appendLine("${pad}$loopVar[0].accept(null);")
+        w.indented {
+            liftExpression(condition, w) { cond ->
+                w.line("if ($cond) {")
+                w.indented {
+                    compileStatements(body, w) { w.line("$loopVar[0].accept(null);") }
+                }
+                w.line("}")
+                w.line("else {")
+                w.indented { compileStatements(rest, w, onEmpty) }
+                w.line("}")
             }
-            out.appendLine("${pad}}")
-            out.appendLine("${pad}else {")
-            compileStatements(rest, condIndent + 1, out, onEmpty)
-            out.appendLine("${pad}}")
         }
 
-        out.appendLine("${pad}};")
-        out.appendLine("${pad}$loopVar[0].accept(null);")
+        w.line("};")
+        w.line("$loopVar[0].accept(null);")
     }
 
     // -- Expression statements ------------------------------------------------
@@ -296,18 +285,16 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
     private fun compileExpressionStatement(
         expr: ExpressionContext,
         rest: List<StatementContext>,
-        indent: Int,
-        out: StringBuilder,
-        onEmpty: ((Int) -> Unit)?,
+        w: CodeWriter,
+        onEmpty: (() -> Unit)?,
     ) {
         if (containsFunctionCall(expr)) {
-            liftExpression(expr, indent, out) { _, innerIndent ->
-                compileStatements(rest, innerIndent, out, onEmpty)
+            liftExpression(expr, w) { _ ->
+                compileStatements(rest, w, onEmpty)
             }
         } else {
-            val pad = "  ".repeat(indent)
-            out.appendLine("${pad}${compileExpression(expr)};")
-            compileStatements(rest, indent, out, onEmpty)
+            w.line("${compileExpression(expr)};")
+            compileStatements(rest, w, onEmpty)
         }
     }
 
@@ -320,7 +307,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
     //
     // liftExpression walks the expression tree. For sub-trees without calls it
     // compiles directly. For calls it emits CPS code and passes the temp
-    // variable (and updated indent) into the [then] callback.
+    // variable into the [then] callback.
 
     /** Recursively checks whether an expression tree contains any function call. */
     private fun containsFunctionCall(expr: ExpressionContext): Boolean = when (expr) {
@@ -345,17 +332,15 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
     /**
      * Lifts function calls out of [expr] into CPS calls, then invokes [then]
-     * with a simple Java expression string (no remaining calls) and the indent
-     * level at which [then] should emit code.
+     * with a simple Java expression string (no remaining calls).
      */
     private fun liftExpression(
         expr: ExpressionContext,
-        indent: Int,
-        out: StringBuilder,
-        then: (simpleExpr: String, indent: Int) -> Unit,
+        w: CodeWriter,
+        then: (simpleExpr: String) -> Unit,
     ) {
         if (!containsFunctionCall(expr)) {
-            then(compileExpression(expr), indent)
+            then(compileExpression(expr))
             return
         }
 
@@ -363,39 +348,31 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
             is FunctionCallExprContext -> {
                 val name = expr.IDENTIFIER().text
                 val args = expr.argumentList().expression()
-                liftExpressionList(args, indent, out) { liftedArgs, argsIndent ->
+                liftExpressionList(args, w) { liftedArgs ->
                     val resultParam = freshArg()
-                    val pad = "  ".repeat(argsIndent)
                     if (name == "println") {
-                        out.appendLine("${pad}Prelude.println(${liftedArgs[0]}, ($resultParam) -> {")
+                        w.line("Prelude.println(${liftedArgs[0]}, ($resultParam) -> {")
                     } else {
-                        out.appendLine("${pad}$name(${liftedArgs.joinToString(", ")}, ($resultParam) -> {")
+                        w.line("$name(${liftedArgs.joinToString(", ")}, ($resultParam) -> {")
                     }
-                    then(resultParam, argsIndent + 1)
-                    out.appendLine("${pad}});")
+                    w.indented { then(resultParam) }
+                    w.line("});")
                 }
             }
-            is AddSubExprContext -> liftBinaryOperation(expr.expression(0), expr.expression(1),
-                if (expr.PLUS() != null) "+" else "-", indent, out, then)
-            is MulDivExprContext -> liftBinaryOperation(expr.expression(0), expr.expression(1), when {
-                expr.MULT() != null -> "*"
-                expr.DIV() != null  -> "/"
-                else                -> "%"
-            }, indent, out, then)
-            is ComparisonExprContext -> liftBinaryOperation(expr.expression(0), expr.expression(1), when {
-                expr.LT() != null -> "<"
-                expr.GT() != null -> ">"
-                expr.LE() != null -> "<="
-                else              -> ">="
-            }, indent, out, then)
+            is AddSubExprContext ->
+                liftBinaryOperation(expr.expression(0), expr.expression(1), operatorOf(expr), w, then)
+            is MulDivExprContext ->
+                liftBinaryOperation(expr.expression(0), expr.expression(1), operatorOf(expr), w, then)
+            is ComparisonExprContext ->
+                liftBinaryOperation(expr.expression(0), expr.expression(1), operatorOf(expr), w, then)
             is EqualityExprContext -> {
-                liftExpression(expr.expression(0), indent, out) { left, leftIndent ->
-                    liftExpression(expr.expression(1), leftIndent, out) { right, rightIndent ->
+                liftExpression(expr.expression(0), w) { left ->
+                    liftExpression(expr.expression(1), w) { right ->
                         val result = if (expr.EQ() != null)
                             "java.util.Objects.equals($left, $right)"
                         else
                             "!java.util.Objects.equals($left, $right)"
-                        then(result, rightIndent)
+                        then(result)
                     }
                 }
             }
@@ -404,54 +381,44 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
                 val leftExpr = expr.expression(0)
                 val rightExpr = expr.expression(1)
                 if (containsFunctionCall(rightExpr)) {
-                    liftExpression(leftExpr, indent, out) { leftVal, leftIndent ->
-                        val pad = "  ".repeat(leftIndent)
-                        out.appendLine("${pad}if ($leftVal) {")
-                        liftExpression(rightExpr, leftIndent + 1, out) { rightVal, rightIndent ->
-                            then(rightVal, rightIndent)
-                        }
-                        out.appendLine("${pad}} else {")
-                        then("false", leftIndent + 1)
-                        out.appendLine("${pad}}")
+                    liftExpression(leftExpr, w) { leftVal ->
+                        w.line("if ($leftVal) {")
+                        w.indented { liftExpression(rightExpr, w, then) }
+                        w.line("} else {")
+                        w.indented { then("false") }
+                        w.line("}")
                     }
                 } else {
-                    liftBinaryOperation(leftExpr, rightExpr, "&&", indent, out, then)
+                    liftBinaryOperation(leftExpr, rightExpr, "&&", w, then)
                 }
             }
             is OrExprContext -> {
                 val leftExpr = expr.expression(0)
                 val rightExpr = expr.expression(1)
                 if (containsFunctionCall(rightExpr)) {
-                    liftExpression(leftExpr, indent, out) { leftVal, leftIndent ->
-                        val pad = "  ".repeat(leftIndent)
-                        out.appendLine("${pad}if ($leftVal) {")
-                        then("true", leftIndent + 1)
-                        out.appendLine("${pad}} else {")
-                        liftExpression(rightExpr, leftIndent + 1, out) { rightVal, rightIndent ->
-                            then(rightVal, rightIndent)
-                        }
-                        out.appendLine("${pad}}")
+                    liftExpression(leftExpr, w) { leftVal ->
+                        w.line("if ($leftVal) {")
+                        w.indented { then("true") }
+                        w.line("} else {")
+                        w.indented { liftExpression(rightExpr, w, then) }
+                        w.line("}")
                     }
                 } else {
-                    liftBinaryOperation(leftExpr, rightExpr, "||", indent, out, then)
+                    liftBinaryOperation(leftExpr, rightExpr, "||", w, then)
                 }
             }
-            is NotExprContext  -> {
-                liftExpression(expr.expression(), indent, out) { inner, innerIndent ->
-                    then("(!$inner)", innerIndent)
-                }
+            is NotExprContext -> {
+                liftExpression(expr.expression(), w) { inner -> then("(!$inner)") }
             }
             is PrimaryExprContext -> {
                 val p = expr.primary()
                 if (p is ParenExprContext) {
-                    liftExpression(p.expression(), indent, out) { inner, innerIndent ->
-                        then("($inner)", innerIndent)
-                    }
+                    liftExpression(p.expression(), w) { inner -> then("($inner)") }
                 } else {
-                    then(compilePrimary(p), indent)
+                    then(compilePrimary(p))
                 }
             }
-            else -> then(compileExpression(expr), indent)
+            else -> then(compileExpression(expr))
         }
     }
 
@@ -460,13 +427,12 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         left: ExpressionContext,
         right: ExpressionContext,
         op: String,
-        indent: Int,
-        out: StringBuilder,
-        then: (String, Int) -> Unit,
+        w: CodeWriter,
+        then: (String) -> Unit,
     ) {
-        liftExpression(left, indent, out) { leftValue, leftIndent ->
-            liftExpression(right, leftIndent, out) { rightValue, rightIndent ->
-                then("($leftValue $op $rightValue)", rightIndent)
+        liftExpression(left, w) { leftValue ->
+            liftExpression(right, w) { rightValue ->
+                then("($leftValue $op $rightValue)")
             }
         }
     }
@@ -474,20 +440,38 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
     /** Lifts a list of expressions left-to-right, collecting simple results. */
     private fun liftExpressionList(
         exprs: List<ExpressionContext>,
-        indent: Int,
-        out: StringBuilder,
-        then: (liftedExprs: List<String>, indent: Int) -> Unit,
+        w: CodeWriter,
+        then: (liftedExprs: List<String>) -> Unit,
     ) {
-        fun go(index: Int, acc: List<String>, currentIndent: Int) {
+        fun go(index: Int, acc: List<String>) {
             if (index >= exprs.size) {
-                then(acc, currentIndent)
+                then(acc)
             } else {
-                liftExpression(exprs[index], currentIndent, out) { lifted, newIndent ->
-                    go(index + 1, acc + lifted, newIndent)
+                liftExpression(exprs[index], w) { lifted ->
+                    go(index + 1, acc + lifted)
                 }
             }
         }
-        go(0, emptyList(), indent)
+        go(0, emptyList())
+    }
+
+    // -- Operator mapping -----------------------------------------------------
+
+    /** Maps an arithmetic or comparison expression node to its Java operator string. */
+    private fun operatorOf(expr: ExpressionContext): String = when (expr) {
+        is AddSubExprContext -> if (expr.PLUS() != null) "+" else "-"
+        is MulDivExprContext -> when {
+            expr.MULT() != null -> "*"
+            expr.DIV() != null  -> "/"
+            else                -> "%"
+        }
+        is ComparisonExprContext -> when {
+            expr.LT() != null -> "<"
+            expr.GT() != null -> ">"
+            expr.LE() != null -> "<="
+            else              -> ">="
+        }
+        else -> error("not a binary operator: ${expr::class.simpleName}")
     }
 
     // -- Type mapping ---------------------------------------------------------
@@ -510,19 +494,12 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
      */
     private fun compileExpression(expr: ExpressionContext): String = when (expr) {
         is PrimaryExprContext -> compilePrimary(expr.primary())
-        is AddSubExprContext -> compileBinaryOperation(expr.expression(0), expr.expression(1),
-            if (expr.PLUS() != null) "+" else "-")
-        is MulDivExprContext -> compileBinaryOperation(expr.expression(0), expr.expression(1), when {
-            expr.MULT() != null -> "*"
-            expr.DIV() != null  -> "/"
-            else                -> "%"
-        })
-        is ComparisonExprContext -> compileBinaryOperation(expr.expression(0), expr.expression(1), when {
-            expr.LT() != null -> "<"
-            expr.GT() != null -> ">"
-            expr.LE() != null -> "<="
-            else              -> ">="
-        })
+        is AddSubExprContext ->
+            compileBinaryOperation(expr.expression(0), expr.expression(1), operatorOf(expr))
+        is MulDivExprContext ->
+            compileBinaryOperation(expr.expression(0), expr.expression(1), operatorOf(expr))
+        is ComparisonExprContext ->
+            compileBinaryOperation(expr.expression(0), expr.expression(1), operatorOf(expr))
         is EqualityExprContext -> {
             val left = compileExpression(expr.expression(0))
             val right = compileExpression(expr.expression(1))
@@ -554,4 +531,29 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         is ParenExprContext -> "(${compileExpression(primary.expression())})"
         else -> error("unsupported primary: ${primary::class.simpleName}")
     }
+}
+
+/** Encapsulates indented Java source code emission. */
+private class CodeWriter {
+    private val buffer = StringBuilder()
+    private var depth = 0
+
+    /** Emits a line of code at the current indentation depth. */
+    fun line(text: String) {
+        buffer.appendLine("${"  ".repeat(depth)}$text")
+    }
+
+    /** Emits a blank line. */
+    fun blankLine() {
+        buffer.appendLine()
+    }
+
+    /** Runs [block] with the indentation depth increased by one. */
+    fun indented(block: () -> Unit) {
+        depth++
+        block()
+        depth--
+    }
+
+    override fun toString(): String = buffer.toString()
 }
