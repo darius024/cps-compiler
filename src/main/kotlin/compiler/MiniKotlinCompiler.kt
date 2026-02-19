@@ -44,7 +44,16 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
             compileStatements(fn.block().statement(), indent + 1, out)
             out.appendLine("${pad}}")
         } else {
-            TODO("non-main functions")
+            val returnType = mapType(fn.type())
+            val params = buildList {
+                fn.parameterList()?.parameter()?.forEach { p ->
+                    add("${mapType(p.type())} ${p.IDENTIFIER().text}")
+                }
+                add("Continuation<$returnType> __continuation")
+            }
+            out.appendLine("${pad}public static void $name(${params.joinToString(", ")}) {")
+            compileStatements(fn.block().statement(), indent + 1, out)
+            out.appendLine("${pad}}")
         }
     }
 
@@ -69,9 +78,39 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         if (varDecl != null) {
             val type = mapType(varDecl.type())
             val name = varDecl.IDENTIFIER().text
-            val value = compileExpression(varDecl.expression())
-            out.appendLine("${pad}$type $name = $value;")
-            compileStatements(rest, indent, out)
+            val rhs = varDecl.expression()
+
+            if (rhs is FunctionCallExprContext) {
+                val fnName = rhs.IDENTIFIER().text
+                val args = rhs.argumentList().expression()
+                val contParam = freshArg()
+                if (fnName == "println") {
+                    val arg = compileExpression(args[0])
+                    out.appendLine("${pad}Prelude.println($arg, ($contParam) -> {")
+                } else {
+                    val compiledArgs = args.joinToString(", ") { compileExpression(it) }
+                    out.appendLine("${pad}$fnName($compiledArgs, ($contParam) -> {")
+                }
+                out.appendLine("${pad}  $type $name = $contParam;")
+                compileStatements(rest, indent + 1, out)
+                out.appendLine("${pad}});")
+            } else {
+                val value = compileExpression(rhs)
+                out.appendLine("${pad}$type $name = $value;")
+                compileStatements(rest, indent, out)
+            }
+            return
+        }
+
+        val retStmt = stmt.returnStatement()
+        if (retStmt != null) {
+            val retExpr = retStmt.expression()
+            if (retExpr != null) {
+                out.appendLine("${pad}__continuation.accept(${compileExpression(retExpr)});")
+            } else {
+                out.appendLine("${pad}__continuation.accept(null);")
+            }
+            out.appendLine("${pad}return;")
             return
         }
 
@@ -134,15 +173,16 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         val args = call.argumentList().expression()
         val pad = "  ".repeat(indent)
 
+        val contParam = freshArg()
         if (name == "println") {
             val arg = compileExpression(args[0])
-            val contParam = freshArg()
             out.appendLine("${pad}Prelude.println($arg, ($contParam) -> {")
-            compileStatements(rest, indent + 1, out)
-            out.appendLine("${pad}});")
         } else {
-            TODO("call to user function: $name")
+            val compiledArgs = args.joinToString(", ") { compileExpression(it) }
+            out.appendLine("${pad}$name($compiledArgs, ($contParam) -> {")
         }
+        compileStatements(rest, indent + 1, out)
+        out.appendLine("${pad}});")
     }
 
     // -- Type mapping ---------------------------------------------------------

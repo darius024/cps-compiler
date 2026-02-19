@@ -375,8 +375,8 @@ class MiniKotlinCompilerTest {
 
     @Test
     fun `two functions calling each other sequentially`() {
-        assertEquals("3\n7\n", compileAndRun("""
-            fun double(n: Int): Int {
+        assertEquals("3\n4\n", compileAndRun("""
+            fun twice(n: Int): Int {
                 return n + n
             }
             fun triple(n: Int): Int {
@@ -385,7 +385,7 @@ class MiniKotlinCompilerTest {
             fun main(): Unit {
                 var a: Int = triple(1)
                 println(a)
-                var b: Int = double(2)
+                var b: Int = twice(2)
                 println(b)
             }
         """))
