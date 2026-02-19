@@ -18,13 +18,17 @@ import MiniKotlinParser.*
 class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
     private var argCounter = 0
+    private var loopCounter = 0
+    private var wrappedVars = emptySet<String>()
 
     private fun freshArg(): String = "arg${argCounter++}"
+    private fun freshLoop(): String = "__loop_${loopCounter++}"
 
     // -- Entry point ----------------------------------------------------------
 
     fun compile(program: ProgramContext, className: String = "MiniProgram"): String {
         argCounter = 0
+        loopCounter = 0
         return buildString {
             appendLine("public class $className {")
             for (fn in program.functionDeclaration()) {
@@ -40,6 +44,8 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
     private fun compileFunction(fn: FunctionDeclarationContext, indent: Int, out: StringBuilder) {
         val name = fn.IDENTIFIER().text
         val pad = "  ".repeat(indent)
+
+        wrappedVars = collectReassignedVars(fn.block().statement())
 
         if (name == "main") {
             out.appendLine("${pad}public static void main(String[] args) {")
@@ -58,31 +64,60 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         out.appendLine("${pad}}")
     }
 
+    /** Collects names of all variables that appear as assignment targets. */
+    private fun collectReassignedVars(stmts: List<StatementContext>): Set<String> {
+        val result = mutableSetOf<String>()
+        fun walk(stmts: List<StatementContext>) {
+            for (stmt in stmts) {
+                stmt.variableAssignment()?.let { result.add(it.IDENTIFIER().text) }
+                stmt.ifStatement()?.let { ifStmt ->
+                    for (block in ifStmt.block()) walk(block.statement())
+                }
+                stmt.whileStatement()?.let { walk(it.block().statement()) }
+            }
+        }
+        walk(stmts)
+        return result
+    }
+
+    private fun isWrapped(name: String): Boolean = name in wrappedVars
+
     // -- Statement compilation ------------------------------------------------
 
     /**
      * Compiles a list of statements in CPS style. Each statement that involves
      * a function call nests the remaining statements inside its continuation.
+     *
+     * [onEmpty] is invoked when the statement list is exhausted. Used by while
+     * loops to emit the loop-back call at the innermost nesting level.
      */
     private fun compileStatements(
         stmts: List<StatementContext>,
         indent: Int,
         out: StringBuilder,
+        onEmpty: ((indent: Int) -> Unit)? = null,
     ) {
-        if (stmts.isEmpty()) return
+        if (stmts.isEmpty()) {
+            onEmpty?.invoke(indent)
+            return
+        }
 
         val stmt = stmts.first()
         val rest = stmts.subList(1, stmts.size)
 
         when {
             stmt.variableDeclaration() != null ->
-                compileVarDecl(stmt.variableDeclaration(), rest, indent, out)
+                compileVarDecl(stmt.variableDeclaration(), rest, indent, out, onEmpty)
+            stmt.variableAssignment() != null ->
+                compileAssignment(stmt.variableAssignment(), rest, indent, out, onEmpty)
             stmt.returnStatement() != null ->
                 compileReturn(stmt.returnStatement(), indent, out)
             stmt.ifStatement() != null ->
-                compileIf(stmt.ifStatement(), rest, indent, out)
+                compileIf(stmt.ifStatement(), rest, indent, out, onEmpty)
+            stmt.whileStatement() != null ->
+                compileWhile(stmt.whileStatement(), rest, indent, out, onEmpty)
             stmt.expression() != null ->
-                compileExpressionStmt(stmt.expression(), rest, indent, out)
+                compileExpressionStmt(stmt.expression(), rest, indent, out, onEmpty)
             else ->
                 TODO("statement type: ${stmt.text}")
         }
@@ -95,6 +130,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         rest: List<StatementContext>,
         indent: Int,
         out: StringBuilder,
+        onEmpty: ((Int) -> Unit)?,
     ) {
         val type = mapType(decl.type())
         val name = decl.IDENTIFIER().text
@@ -102,8 +138,35 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
         liftExpression(rhs, indent, out) { value, innerIndent ->
             val pad = "  ".repeat(innerIndent)
-            out.appendLine("${pad}$type $name = $value;")
-            compileStatements(rest, innerIndent, out)
+            if (isWrapped(name)) {
+                out.appendLine("${pad}$type[] $name = {$value};")
+            } else {
+                out.appendLine("${pad}$type $name = $value;")
+            }
+            compileStatements(rest, innerIndent, out, onEmpty)
+        }
+    }
+
+    // -- Variable assignment --------------------------------------------------
+
+    private fun compileAssignment(
+        assign: VariableAssignmentContext,
+        rest: List<StatementContext>,
+        indent: Int,
+        out: StringBuilder,
+        onEmpty: ((Int) -> Unit)?,
+    ) {
+        val name = assign.IDENTIFIER().text
+        val rhs = assign.expression()
+
+        liftExpression(rhs, indent, out) { value, innerIndent ->
+            val pad = "  ".repeat(innerIndent)
+            if (isWrapped(name)) {
+                out.appendLine("${pad}$name[0] = $value;")
+            } else {
+                out.appendLine("${pad}$name = $value;")
+            }
+            compileStatements(rest, innerIndent, out, onEmpty)
         }
     }
 
@@ -137,19 +200,58 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         rest: List<StatementContext>,
         indent: Int,
         out: StringBuilder,
+        onEmpty: ((Int) -> Unit)?,
     ) {
         val pad = "  ".repeat(indent)
         val cond = compileExpression(ifStmt.expression())
         val blocks = ifStmt.block()
 
         out.appendLine("${pad}if ($cond) {")
-        compileStatements(blocks[0].statement() + rest, indent + 1, out)
+        compileStatements(blocks[0].statement() + rest, indent + 1, out, onEmpty)
         out.appendLine("${pad}}")
 
         val elseBody = if (blocks.size > 1) blocks[1].statement() + rest else rest
         out.appendLine("${pad}else {")
-        compileStatements(elseBody, indent + 1, out)
+        compileStatements(elseBody, indent + 1, out, onEmpty)
         out.appendLine("${pad}}")
+    }
+
+    // -- While loops ----------------------------------------------------------
+
+    /**
+     * Compiles a while loop using a recursive continuation. A self-referencing
+     * Continuation array is used because Java lambdas cannot reference
+     * themselves directly.
+     */
+    private fun compileWhile(
+        whileStmt: WhileStatementContext,
+        rest: List<StatementContext>,
+        indent: Int,
+        out: StringBuilder,
+        onEmpty: ((Int) -> Unit)?,
+    ) {
+        val pad = "  ".repeat(indent)
+        val loopVar = freshLoop()
+        val unusedParam = freshArg()
+        val cond = compileExpression(whileStmt.expression())
+        val body = whileStmt.block().statement()
+
+        out.appendLine("${pad}Continuation<Void>[] $loopVar = new Continuation[1];")
+        out.appendLine("${pad}$loopVar[0] = ($unusedParam) -> {")
+
+        out.appendLine("${pad}  if ($cond) {")
+        compileStatements(body, indent + 2, out) { loopBackIndent ->
+            val lp = "  ".repeat(loopBackIndent)
+            out.appendLine("${lp}$loopVar[0].accept(null);")
+        }
+        out.appendLine("${pad}  }")
+
+        out.appendLine("${pad}  else {")
+        compileStatements(rest, indent + 2, out, onEmpty)
+        out.appendLine("${pad}  }")
+
+        out.appendLine("${pad}};")
+        out.appendLine("${pad}$loopVar[0].accept(null);")
     }
 
     // -- Expression statements ------------------------------------------------
@@ -159,15 +261,16 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         rest: List<StatementContext>,
         indent: Int,
         out: StringBuilder,
+        onEmpty: ((Int) -> Unit)?,
     ) {
         if (containsFunctionCall(expr)) {
             liftExpression(expr, indent, out) { _, innerIndent ->
-                compileStatements(rest, innerIndent, out)
+                compileStatements(rest, innerIndent, out, onEmpty)
             }
         } else {
             val pad = "  ".repeat(indent)
             out.appendLine("${pad}${compileExpression(expr)};")
-            compileStatements(rest, indent, out)
+            compileStatements(rest, indent, out, onEmpty)
         }
     }
 
@@ -364,7 +467,10 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         is IntLiteralContext -> primary.INTEGER_LITERAL().text
         is StringLiteralContext -> primary.STRING_LITERAL().text
         is BoolLiteralContext -> primary.BOOLEAN_LITERAL().text
-        is IdentifierExprContext -> primary.IDENTIFIER().text
+        is IdentifierExprContext -> {
+            val name = primary.IDENTIFIER().text
+            if (isWrapped(name)) "$name[0]" else name
+        }
         is ParenExprContext -> "(${compileExpression(primary.expression())})"
         else -> TODO("primary type: ${primary::class.simpleName}")
     }
