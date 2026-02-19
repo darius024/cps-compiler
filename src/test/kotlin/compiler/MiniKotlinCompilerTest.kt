@@ -467,6 +467,87 @@ class MiniKotlinCompilerTest {
         """))
     }
 
+    // -- Variable reassignment ------------------------------------------------
+
+    @Test
+    fun `simple variable reassignment`() {
+        assertEquals("2\n", compileAndRun("""
+            fun main(): Unit {
+                var x: Int = 1
+                x = 2
+                println(x)
+            }
+        """))
+    }
+
+    @Test
+    fun `reassignment after println`() {
+        assertEquals("1\n2\n", compileAndRun("""
+            fun main(): Unit {
+                var x: Int = 1
+                println(x)
+                x = 2
+                println(x)
+            }
+        """))
+    }
+
+    // -- While loops ----------------------------------------------------------
+
+    @Test
+    fun `while loop with no function calls in body`() {
+        assertEquals("0\n", compileAndRun("""
+            fun main(): Unit {
+                var i: Int = 5
+                while (i > 0) {
+                    i = i - 1
+                }
+                println(i)
+            }
+        """))
+    }
+
+    @Test
+    fun `while loop with println in body`() {
+        assertEquals("3\n2\n1\n", compileAndRun("""
+            fun main(): Unit {
+                var i: Int = 3
+                while (i > 0) {
+                    println(i)
+                    i = i - 1
+                }
+            }
+        """))
+    }
+
+    @Test
+    fun `while loop accumulator`() {
+        assertEquals("15\n", compileAndRun("""
+            fun main(): Unit {
+                var sum: Int = 0
+                var i: Int = 1
+                while (i <= 5) {
+                    sum = sum + i
+                    i = i + 1
+                }
+                println(sum)
+            }
+        """))
+    }
+
+    @Test
+    fun `while loop followed by more statements`() {
+        assertEquals("done\n", compileAndRun("""
+            fun main(): Unit {
+                var i: Int = 3
+                while (i > 0) {
+                    i = i - 1
+                }
+                println("done")
+            }
+        """))
+    }
+
     // -- Integration (existing) -----------------------------------------------
 
     @Test
