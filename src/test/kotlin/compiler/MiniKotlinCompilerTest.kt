@@ -271,6 +271,55 @@ class MiniKotlinCompilerTest {
         """))
     }
 
+    // -- If/else --------------------------------------------------------------
+
+    @Test
+    fun `if-else true branch`() {
+        assertEquals("yes\n", compileAndRun("""
+            fun main(): Unit {
+                if (true) { println("yes") } else { println("no") }
+            }
+        """))
+    }
+
+    @Test
+    fun `if-else false branch`() {
+        assertEquals("no\n", compileAndRun("""
+            fun main(): Unit {
+                if (false) { println("yes") } else { println("no") }
+            }
+        """))
+    }
+
+    @Test
+    fun `if without else`() {
+        assertEquals("gt\n", compileAndRun("""
+            fun main(): Unit {
+                if (3 > 2) { println("gt") }
+            }
+        """))
+    }
+
+    @Test
+    fun `if-else followed by more statements`() {
+        assertEquals("a\nb\n", compileAndRun("""
+            fun main(): Unit {
+                if (true) { println("a") } else { println("z") }
+                println("b")
+            }
+        """))
+    }
+
+    @Test
+    fun `if without else followed by more statements`() {
+        assertEquals("done\n", compileAndRun("""
+            fun main(): Unit {
+                if (false) { println("skip") }
+                println("done")
+            }
+        """))
+    }
+
     // -- Integration (existing) -----------------------------------------------
 
     @Test
