@@ -320,6 +320,77 @@ class MiniKotlinCompilerTest {
         """))
     }
 
+    // -- User-defined functions -----------------------------------------------
+
+    @Test
+    fun `unit function that calls println`() {
+        assertEquals("hi\n", compileAndRun("""
+            fun greet(msg: String): Unit {
+                println(msg)
+            }
+            fun main(): Unit {
+                greet("hi")
+            }
+        """))
+    }
+
+    @Test
+    fun `function returning a constant`() {
+        assertEquals("5\n", compileAndRun("""
+            fun five(x: Int): Int {
+                return 5
+            }
+            fun main(): Unit {
+                var r: Int = five(0)
+                println(r)
+            }
+        """))
+    }
+
+    @Test
+    fun `function using its parameter`() {
+        assertEquals("8\n", compileAndRun("""
+            fun inc(n: Int): Int {
+                return n + 1
+            }
+            fun main(): Unit {
+                var r: Int = inc(7)
+                println(r)
+            }
+        """))
+    }
+
+    @Test
+    fun `function with multiple parameters`() {
+        assertEquals("7\n", compileAndRun("""
+            fun add(a: Int, b: Int): Int {
+                return a + b
+            }
+            fun main(): Unit {
+                var r: Int = add(3, 4)
+                println(r)
+            }
+        """))
+    }
+
+    @Test
+    fun `two functions calling each other sequentially`() {
+        assertEquals("3\n7\n", compileAndRun("""
+            fun double(n: Int): Int {
+                return n + n
+            }
+            fun triple(n: Int): Int {
+                return n + n + n
+            }
+            fun main(): Unit {
+                var a: Int = triple(1)
+                println(a)
+                var b: Int = double(2)
+                println(b)
+            }
+        """))
+    }
+
     // -- Integration (existing) -----------------------------------------------
 
     @Test
