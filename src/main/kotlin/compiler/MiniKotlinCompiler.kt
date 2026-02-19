@@ -81,8 +81,8 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
                 compileReturn(stmt.returnStatement(), indent, out)
             stmt.ifStatement() != null ->
                 compileIf(stmt.ifStatement(), rest, indent, out)
-            stmt.expression() is FunctionCallExprContext ->
-                emitCpsCall(stmt.expression() as FunctionCallExprContext, rest, indent, out)
+            stmt.expression() != null ->
+                compileExpressionStmt(stmt.expression(), rest, indent, out)
             else ->
                 TODO("statement type: ${stmt.text}")
         }
@@ -98,29 +98,31 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
     ) {
         val type = mapType(decl.type())
         val name = decl.IDENTIFIER().text
-        val pad = "  ".repeat(indent)
         val rhs = decl.expression()
 
-        if (rhs is FunctionCallExprContext) {
-            val contParam = freshArg()
-            emitCpsCallOpen(rhs, contParam, indent, out)
-            out.appendLine("${pad}  $type $name = $contParam;")
-            compileStatements(rest, indent + 1, out)
-            out.appendLine("${pad}});")
-        } else {
-            out.appendLine("${pad}$type $name = ${compileExpression(rhs)};")
-            compileStatements(rest, indent, out)
+        liftExpression(rhs, indent, out) { value, innerIndent ->
+            val pad = "  ".repeat(innerIndent)
+            out.appendLine("${pad}$type $name = $value;")
+            compileStatements(rest, innerIndent, out)
         }
     }
 
     // -- Return ---------------------------------------------------------------
 
     private fun compileReturn(ret: ReturnStatementContext, indent: Int, out: StringBuilder) {
-        val pad = "  ".repeat(indent)
         val expr = ret.expression()
-        val value = if (expr != null) compileExpression(expr) else "null"
-        out.appendLine("${pad}__continuation.accept($value);")
-        out.appendLine("${pad}return;")
+        if (expr == null) {
+            val pad = "  ".repeat(indent)
+            out.appendLine("${pad}__continuation.accept(null);")
+            out.appendLine("${pad}return;")
+            return
+        }
+
+        liftExpression(expr, indent, out) { value, innerIndent ->
+            val pad = "  ".repeat(innerIndent)
+            out.appendLine("${pad}__continuation.accept($value);")
+            out.appendLine("${pad}return;")
+        }
     }
 
     // -- If/else --------------------------------------------------------------
@@ -150,42 +152,168 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         out.appendLine("${pad}}")
     }
 
-    // -- CPS function calls ---------------------------------------------------
+    // -- Expression statements ------------------------------------------------
 
-    /**
-     * Emits the opening line of a CPS call: `name(args, (contParam) -> {`
-     * Handles println specially (routed through Prelude).
-     */
-    private fun emitCpsCallOpen(
-        call: FunctionCallExprContext,
-        contParam: String,
-        indent: Int,
-        out: StringBuilder,
-    ) {
-        val name = call.IDENTIFIER().text
-        val args = call.argumentList().expression()
-        val pad = "  ".repeat(indent)
-
-        if (name == "println") {
-            out.appendLine("${pad}Prelude.println(${compileExpression(args[0])}, ($contParam) -> {")
-        } else {
-            val compiledArgs = args.joinToString(", ") { compileExpression(it) }
-            out.appendLine("${pad}$name($compiledArgs, ($contParam) -> {")
-        }
-    }
-
-    /** Emits a complete CPS call as a statement, nesting the rest inside. */
-    private fun emitCpsCall(
-        call: FunctionCallExprContext,
+    private fun compileExpressionStmt(
+        expr: ExpressionContext,
         rest: List<StatementContext>,
         indent: Int,
         out: StringBuilder,
     ) {
-        val pad = "  ".repeat(indent)
-        val contParam = freshArg()
-        emitCpsCallOpen(call, contParam, indent, out)
-        compileStatements(rest, indent + 1, out)
-        out.appendLine("${pad}});")
+        if (containsFunctionCall(expr)) {
+            liftExpression(expr, indent, out) { _, innerIndent ->
+                compileStatements(rest, innerIndent, out)
+            }
+        } else {
+            val pad = "  ".repeat(indent)
+            out.appendLine("${pad}${compileExpression(expr)};")
+            compileStatements(rest, indent, out)
+        }
+    }
+
+    // -- Expression lifting ---------------------------------------------------
+    //
+    // When an expression contains function calls, we cannot compile it as a
+    // single Java expression. Instead we "lift" calls out: each call becomes
+    // a CPS invocation whose continuation receives the result in a fresh
+    // variable, and the rest of the expression is rebuilt using those variables.
+    //
+    // liftExpression walks the expression tree. For sub-trees without calls it
+    // compiles directly. For calls it emits CPS code and passes the temp
+    // variable (and updated indent) into the [then] callback.
+
+    private fun containsFunctionCall(expr: ExpressionContext): Boolean = when (expr) {
+        is FunctionCallExprContext -> true
+        is PrimaryExprContext -> {
+            val p = expr.primary()
+            p is ParenExprContext && containsFunctionCall(p.expression())
+        }
+        is AddSubExprContext ->
+            containsFunctionCall(expr.expression(0)) || containsFunctionCall(expr.expression(1))
+        is MulDivExprContext ->
+            containsFunctionCall(expr.expression(0)) || containsFunctionCall(expr.expression(1))
+        is ComparisonExprContext ->
+            containsFunctionCall(expr.expression(0)) || containsFunctionCall(expr.expression(1))
+        is EqualityExprContext ->
+            containsFunctionCall(expr.expression(0)) || containsFunctionCall(expr.expression(1))
+        is AndExprContext ->
+            containsFunctionCall(expr.expression(0)) || containsFunctionCall(expr.expression(1))
+        is OrExprContext ->
+            containsFunctionCall(expr.expression(0)) || containsFunctionCall(expr.expression(1))
+        is NotExprContext ->
+            containsFunctionCall(expr.expression())
+        else -> false
+    }
+
+    /**
+     * Lifts function calls out of [expr] into CPS calls, then invokes [then]
+     * with a simple Java expression string (no remaining calls) and the indent
+     * level at which [then] should emit code.
+     */
+    private fun liftExpression(
+        expr: ExpressionContext,
+        indent: Int,
+        out: StringBuilder,
+        then: (simpleExpr: String, indent: Int) -> Unit,
+    ) {
+        if (!containsFunctionCall(expr)) {
+            then(compileExpression(expr), indent)
+            return
+        }
+
+        when (expr) {
+            is FunctionCallExprContext -> {
+                val name = expr.IDENTIFIER().text
+                val args = expr.argumentList().expression()
+                liftExprList(args, indent, out) { liftedArgs, argsIndent ->
+                    val contParam = freshArg()
+                    val pad = "  ".repeat(argsIndent)
+                    if (name == "println") {
+                        out.appendLine("${pad}Prelude.println(${liftedArgs[0]}, ($contParam) -> {")
+                    } else {
+                        out.appendLine("${pad}$name(${liftedArgs.joinToString(", ")}, ($contParam) -> {")
+                    }
+                    then(contParam, argsIndent + 1)
+                    out.appendLine("${pad}});")
+                }
+            }
+            is AddSubExprContext -> liftBinaryOp(expr.expression(0), expr.expression(1),
+                if (expr.PLUS() != null) "+" else "-", indent, out, then)
+            is MulDivExprContext -> liftBinaryOp(expr.expression(0), expr.expression(1), when {
+                expr.MULT() != null -> "*"
+                expr.DIV() != null  -> "/"
+                else                -> "%"
+            }, indent, out, then)
+            is ComparisonExprContext -> liftBinaryOp(expr.expression(0), expr.expression(1), when {
+                expr.LT() != null -> "<"
+                expr.GT() != null -> ">"
+                expr.LE() != null -> "<="
+                else              -> ">="
+            }, indent, out, then)
+            is EqualityExprContext -> {
+                liftExpression(expr.expression(0), indent, out) { left, li ->
+                    liftExpression(expr.expression(1), li, out) { right, ri ->
+                        val result = if (expr.EQ() != null)
+                            "java.util.Objects.equals($left, $right)"
+                        else
+                            "!java.util.Objects.equals($left, $right)"
+                        then(result, ri)
+                    }
+                }
+            }
+            is AndExprContext  -> liftBinaryOp(expr.expression(0), expr.expression(1), "&&", indent, out, then)
+            is OrExprContext   -> liftBinaryOp(expr.expression(0), expr.expression(1), "||", indent, out, then)
+            is NotExprContext  -> {
+                liftExpression(expr.expression(), indent, out) { inner, innerIndent ->
+                    then("(!$inner)", innerIndent)
+                }
+            }
+            is PrimaryExprContext -> {
+                val p = expr.primary()
+                if (p is ParenExprContext) {
+                    liftExpression(p.expression(), indent, out) { inner, innerIndent ->
+                        then("($inner)", innerIndent)
+                    }
+                } else {
+                    then(compilePrimary(p), indent)
+                }
+            }
+            else -> then(compileExpression(expr), indent)
+        }
+    }
+
+    private fun liftBinaryOp(
+        left: ExpressionContext,
+        right: ExpressionContext,
+        op: String,
+        indent: Int,
+        out: StringBuilder,
+        then: (String, Int) -> Unit,
+    ) {
+        liftExpression(left, indent, out) { l, li ->
+            liftExpression(right, li, out) { r, ri ->
+                then("($l $op $r)", ri)
+            }
+        }
+    }
+
+    /** Lifts a list of expressions left-to-right, collecting simple results. */
+    private fun liftExprList(
+        exprs: List<ExpressionContext>,
+        indent: Int,
+        out: StringBuilder,
+        then: (liftedExprs: List<String>, indent: Int) -> Unit,
+    ) {
+        fun go(index: Int, acc: List<String>, currentIndent: Int) {
+            if (index >= exprs.size) {
+                then(acc, currentIndent)
+            } else {
+                liftExpression(exprs[index], currentIndent, out) { lifted, newIndent ->
+                    go(index + 1, acc + lifted, newIndent)
+                }
+            }
+        }
+        go(0, emptyList(), indent)
     }
 
     // -- Type mapping ---------------------------------------------------------

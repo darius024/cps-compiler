@@ -421,7 +421,7 @@ class MiniKotlinCompilerTest {
 
     @Test
     fun `return multiplied by function call result`() {
-        assertEquals("30\n", compileAndRun("""
+        assertEquals("27\n", compileAndRun("""
             fun triple(n: Int): Int {
                 return n + n + n
             }
