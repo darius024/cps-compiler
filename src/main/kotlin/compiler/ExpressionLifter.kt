@@ -10,8 +10,8 @@ import MiniKotlinParser.*
 // variable, and the rest of the expression is rebuilt using those variables.
 //
 // ExpressionLifter walks the expression tree. For sub-trees without calls
-// it delegates to compileExpression. For calls it emits CPS code and passes
-// the temp variable into the [then] callback.
+// it delegates to SimpleExpressionCompiler. For calls it emits CPS code
+// and passes the temp variable into the [then] callback.
 
 /** Maps an arithmetic or comparison expression node to its Java operator string. */
 internal fun operatorOf(expr: ExpressionContext): String = when (expr) {
@@ -33,12 +33,11 @@ internal fun operatorOf(expr: ExpressionContext): String = when (expr) {
 /**
  * Lifts function calls out of expressions into CPS-style invocations.
  *
- * Depends on [compileExpression] and [compilePrimary] for call-free sub-trees,
- * and [names] for generating fresh continuation parameter names.
+ * Depends on [expressions] for compiling call-free sub-trees, and
+ * [names] for generating fresh continuation parameter names.
  */
 internal class ExpressionLifter(
-    private val compileExpression: (ExpressionContext) -> String,
-    private val compilePrimary: (PrimaryContext) -> String,
+    private val expressions: SimpleExpressionCompiler,
     private val names: NameSupply,
 ) {
 
@@ -73,7 +72,7 @@ internal class ExpressionLifter(
         then: (simpleExpr: String) -> Unit,
     ) {
         if (!containsFunctionCall(expr)) {
-            then(compileExpression(expr))
+            then(expressions.compileExpression(expr))
             return
         }
 
@@ -115,11 +114,8 @@ internal class ExpressionLifter(
                 val rightExpr = expr.expression(1)
                 if (containsFunctionCall(rightExpr)) {
                     liftExpression(leftExpr, w) { leftVal ->
-                        w.line("if ($leftVal) {")
-                        w.indented { liftExpression(rightExpr, w, then) }
-                        w.line("} else {")
-                        w.indented { then("false") }
-                        w.line("}")
+                        w.block("if ($leftVal)") { liftExpression(rightExpr, w, then) }
+                        w.block("else") { then("false") }
                     }
                 } else {
                     liftBinaryOperation(leftExpr, rightExpr, "&&", w, then)
@@ -130,11 +126,8 @@ internal class ExpressionLifter(
                 val rightExpr = expr.expression(1)
                 if (containsFunctionCall(rightExpr)) {
                     liftExpression(leftExpr, w) { leftVal ->
-                        w.line("if ($leftVal) {")
-                        w.indented { then("true") }
-                        w.line("} else {")
-                        w.indented { liftExpression(rightExpr, w, then) }
-                        w.line("}")
+                        w.block("if ($leftVal)") { then("true") }
+                        w.block("else") { liftExpression(rightExpr, w, then) }
                     }
                 } else {
                     liftBinaryOperation(leftExpr, rightExpr, "||", w, then)
@@ -148,10 +141,10 @@ internal class ExpressionLifter(
                 if (p is ParenExprContext) {
                     liftExpression(p.expression(), w) { inner -> then("($inner)") }
                 } else {
-                    then(compilePrimary(p))
+                    then(expressions.compilePrimary(p))
                 }
             }
-            else -> then(compileExpression(expr))
+            else -> then(expressions.compileExpression(expr))
         }
     }
 

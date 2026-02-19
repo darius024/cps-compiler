@@ -15,17 +15,43 @@ import MiniKotlinBaseVisitor
 import MiniKotlinParser
 import MiniKotlinParser.*
 
+/** Maps a MiniKotlin type to its boxed Java equivalent (needed for generics). */
+internal fun toJavaType(type: TypeContext): String = when {
+    type.INT_TYPE() != null     -> "Integer"
+    type.STRING_TYPE() != null  -> "String"
+    type.BOOLEAN_TYPE() != null -> "Boolean"
+    type.UNIT_TYPE() != null    -> "Void"
+    else -> error("unknown type: ${type.text}")
+}
+
+/**
+ * Collects names of all variables that appear as assignment targets anywhere
+ * in a function body, including inside nested if/while blocks.
+ */
+internal fun collectReassignedVariables(stmts: List<StatementContext>): Set<String> {
+    val result = mutableSetOf<String>()
+    fun walk(stmts: List<StatementContext>) {
+        for (stmt in stmts) {
+            stmt.variableAssignment()?.let { result.add(it.IDENTIFIER().text) }
+            stmt.ifStatement()?.let { ifStmt ->
+                for (block in ifStmt.block()) walk(block.statement())
+            }
+            stmt.whileStatement()?.let { walk(it.block().statement()) }
+        }
+    }
+    walk(stmts)
+    return result
+}
+
 class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
     private val names = NameSupply()
-    private val lifter = ExpressionLifter(::compileExpression, ::compilePrimary, names)
+    private val expressions = SimpleExpressionCompiler(::isReassigned)
+    private val lifter = ExpressionLifter(expressions, names)
 
-    /**
-     * Variables in the current function that are targets of assignment statements.
-     * These must be wrapped in single-element arrays so that Java lambdas can
-     * mutate them (Java requires captured locals to be effectively final).
-     */
     private var reassignedVariables = emptySet<String>()
+
+    private fun isReassigned(name: String): Boolean = name in reassignedVariables
 
     // -- Entry point ----------------------------------------------------------
 
@@ -33,14 +59,12 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
     fun compile(program: ProgramContext, className: String = "MiniProgram"): String {
         names.reset()
         val w = CodeWriter()
-        w.line("public class $className {")
-        w.indented {
+        w.block("public class $className") {
             for (function in program.functionDeclaration()) {
                 w.blankLine()
                 compileFunction(function, w)
             }
         }
-        w.line("}")
         return w.toString()
     }
 
@@ -56,8 +80,8 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
         reassignedVariables = collectReassignedVariables(function.block().statement())
 
-        if (name == "main") {
-            w.line("public static void main(String[] args) {")
+        val header = if (name == "main") {
+            "public static void main(String[] args)"
         } else {
             val returnType = toJavaType(function.type())
             val params = buildList {
@@ -66,7 +90,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
                 }
                 add("Continuation<$returnType> __continuation")
             }
-            w.line("public static void $name(${params.joinToString(", ")}) {")
+            "public static void $name(${params.joinToString(", ")})"
         }
 
         // Non-main functions that fall through without a return must still call their continuation.
@@ -74,30 +98,8 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
             { w.line("__continuation.accept(null);") }
         } else null
 
-        w.indented { compileStatements(function.block().statement(), w, implicitReturn) }
-        w.line("}")
+        w.block(header) { compileStatements(function.block().statement(), w, implicitReturn) }
     }
-
-    /**
-     * Collects names of all variables that appear as assignment targets anywhere
-     * in the function body, including inside nested if/while blocks.
-     */
-    private fun collectReassignedVariables(stmts: List<StatementContext>): Set<String> {
-        val result = mutableSetOf<String>()
-        fun walk(stmts: List<StatementContext>) {
-            for (stmt in stmts) {
-                stmt.variableAssignment()?.let { result.add(it.IDENTIFIER().text) }
-                stmt.ifStatement()?.let { ifStmt ->
-                    for (block in ifStmt.block()) walk(block.statement())
-                }
-                stmt.whileStatement()?.let { walk(it.block().statement()) }
-            }
-        }
-        walk(stmts)
-        return result
-    }
-
-    private fun isReassigned(name: String): Boolean = name in reassignedVariables
 
     // -- Statement compilation ------------------------------------------------
 
@@ -222,14 +224,10 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         val blocks = ifStmt.block()
 
         lifter.liftExpression(condition, w) { cond ->
-            w.line("if ($cond) {")
-            w.indented { compileStatements(blocks[0].statement() + rest, w, onEmpty) }
-            w.line("}")
+            w.block("if ($cond)") { compileStatements(blocks[0].statement() + rest, w, onEmpty) }
 
             val elseBody = if (blocks.size > 1) blocks[1].statement() + rest else rest
-            w.line("else {")
-            w.indented { compileStatements(elseBody, w, onEmpty) }
-            w.line("}")
+            w.block("else") { compileStatements(elseBody, w, onEmpty) }
         }
     }
 
@@ -256,14 +254,10 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
         w.indented {
             lifter.liftExpression(condition, w) { cond ->
-                w.line("if ($cond) {")
-                w.indented {
+                w.block("if ($cond)") {
                     compileStatements(body, w) { w.line("$loopVar[0].accept(null);") }
                 }
-                w.line("}")
-                w.line("else {")
-                w.indented { compileStatements(rest, w, onEmpty) }
-                w.line("}")
+                w.block("else") { compileStatements(rest, w, onEmpty) }
             }
         }
 
@@ -285,67 +279,8 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
                 compileStatements(rest, w, onEmpty)
             }
         } else {
-            w.line("${compileExpression(expr)};")
+            w.line("${expressions.compileExpression(expr)};")
             compileStatements(rest, w, onEmpty)
         }
-    }
-
-    // -- Type mapping ---------------------------------------------------------
-
-    /** Maps a MiniKotlin type to its boxed Java equivalent (needed for generics). */
-    private fun toJavaType(type: TypeContext): String = when {
-        type.INT_TYPE() != null     -> "Integer"
-        type.STRING_TYPE() != null  -> "String"
-        type.BOOLEAN_TYPE() != null -> "Boolean"
-        type.UNIT_TYPE() != null    -> "Void"
-        else -> error("unknown type: ${type.text}")
-    }
-
-    // -- Expression compilation (simple, no function calls) -------------------
-
-    /**
-     * Compiles an expression that is guaranteed to contain no function calls
-     * into a single Java expression string. Throws if a function call is
-     * encountered — use [ExpressionLifter.liftExpression] for expressions
-     * that may contain calls.
-     */
-    private fun compileExpression(expr: ExpressionContext): String = when (expr) {
-        is PrimaryExprContext -> compilePrimary(expr.primary())
-        is AddSubExprContext ->
-            compileBinaryOperation(expr.expression(0), expr.expression(1), operatorOf(expr))
-        is MulDivExprContext ->
-            compileBinaryOperation(expr.expression(0), expr.expression(1), operatorOf(expr))
-        is ComparisonExprContext ->
-            compileBinaryOperation(expr.expression(0), expr.expression(1), operatorOf(expr))
-        is EqualityExprContext -> {
-            val left = compileExpression(expr.expression(0))
-            val right = compileExpression(expr.expression(1))
-            if (expr.EQ() != null)
-                "java.util.Objects.equals($left, $right)"
-            else
-                "!java.util.Objects.equals($left, $right)"
-        }
-        is AndExprContext  -> compileBinaryOperation(expr.expression(0), expr.expression(1), "&&")
-        is OrExprContext   -> compileBinaryOperation(expr.expression(0), expr.expression(1), "||")
-        is NotExprContext  -> "(!${compileExpression(expr.expression())})"
-        is FunctionCallExprContext -> error("function call in simple expression context: ${expr.text}")
-        else -> error("unsupported expression: ${expr::class.simpleName}")
-    }
-
-    /** Compiles a simple binary operation into a parenthesized Java expression. */
-    private fun compileBinaryOperation(left: ExpressionContext, right: ExpressionContext, op: String): String =
-        "(${compileExpression(left)} $op ${compileExpression(right)})"
-
-    /** Compiles a primary expression (literal, identifier, or parenthesized sub-expression). */
-    private fun compilePrimary(primary: PrimaryContext): String = when (primary) {
-        is IntLiteralContext -> primary.INTEGER_LITERAL().text
-        is StringLiteralContext -> primary.STRING_LITERAL().text
-        is BoolLiteralContext -> primary.BOOLEAN_LITERAL().text
-        is IdentifierExprContext -> {
-            val name = primary.IDENTIFIER().text
-            if (isReassigned(name)) "$name[0]" else name
-        }
-        is ParenExprContext -> "(${compileExpression(primary.expression())})"
-        else -> error("unsupported primary: ${primary::class.simpleName}")
     }
 }

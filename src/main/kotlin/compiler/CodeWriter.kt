@@ -15,6 +15,13 @@ internal class CodeWriter {
         buffer.appendLine()
     }
 
+    /** Emits `header {`, runs [body] indented, then emits `}`. */
+    fun block(header: String, body: () -> Unit) {
+        line("$header {")
+        indented(body)
+        line("}")
+    }
+
     /** Runs [block] with the indentation depth increased by one. */
     fun indented(block: () -> Unit) {
         depth++
