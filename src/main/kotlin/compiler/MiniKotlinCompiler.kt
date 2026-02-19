@@ -27,18 +27,18 @@ internal fun toJavaType(type: TypeContext): String = when {
  * Collects names of all variables that appear as assignment targets anywhere
  * in a function body, including inside nested if/while blocks.
  */
-internal fun collectReassignedVariables(stmts: List<StatementContext>): Set<String> {
+internal fun collectReassignedVariables(statements: List<StatementContext>): Set<String> {
     val result = mutableSetOf<String>()
-    fun walk(stmts: List<StatementContext>) {
-        for (stmt in stmts) {
-            stmt.variableAssignment()?.let { result.add(it.IDENTIFIER().text) }
-            stmt.ifStatement()?.let { ifStmt ->
+    fun walk(statements: List<StatementContext>) {
+        for (statement in statements) {
+            statement.variableAssignment()?.let { result.add(it.IDENTIFIER().text) }
+            statement.ifStatement()?.let { ifStmt ->
                 for (block in ifStmt.block()) walk(block.statement())
             }
-            stmt.whileStatement()?.let { walk(it.block().statement()) }
+            statement.whileStatement()?.let { walk(it.block().statement()) }
         }
     }
-    walk(stmts)
+    walk(statements)
     return result
 }
 
@@ -57,14 +57,14 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
     /** Compiles a complete MiniKotlin program into a single Java class with CPS-transformed functions. */
     fun compile(program: ProgramContext, className: String = "MiniProgram"): String {
         names.reset()
-        val w = CodeWriter()
-        w.block("public class $className") {
+        val writer = CodeWriter()
+        writer.block("public class $className") {
             for (function in program.functionDeclaration()) {
-                w.blankLine()
-                compileFunction(function, w)
+                writer.blankLine()
+                compileFunction(function, writer)
             }
         }
-        return w.toString()
+        return writer.toString()
     }
 
     // -- Function compilation -------------------------------------------------
@@ -74,7 +74,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
      * entry point; all other functions receive an extra [Continuation] parameter
      * and use it to deliver their return value instead of returning directly.
      */
-    private fun compileFunction(function: FunctionDeclarationContext, w: CodeWriter) {
+    private fun compileFunction(function: FunctionDeclarationContext, writer: CodeWriter) {
         val name = function.IDENTIFIER().text
 
         reassignedVariables = collectReassignedVariables(function.block().statement())
@@ -83,21 +83,21 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
             "public static void main(String[] args)"
         } else {
             val returnType = toJavaType(function.type())
-            val params = buildList {
-                function.parameterList()?.parameter()?.forEach { p ->
-                    add("${toJavaType(p.type())} ${p.IDENTIFIER().text}")
+            val parameters = buildList {
+                function.parameterList()?.parameter()?.forEach { param ->
+                    add("${toJavaType(param.type())} ${param.IDENTIFIER().text}")
                 }
                 add("Continuation<$returnType> __continuation")
             }
-            "public static void $name(${params.joinToString(", ")})"
+            "public static void $name(${parameters.joinToString(", ")})"
         }
 
         // Non-main functions that fall through without a return must still call their continuation.
         val implicitReturn: (() -> Unit)? = if (name != "main") {
-            { w.line("__continuation.accept(null);") }
+            { writer.line("__continuation.accept(null);") }
         } else null
 
-        w.block(header) { compileStatements(function.block().statement(), w, implicitReturn) }
+        writer.block(header) { compileStatements(function.block().statement(), writer, implicitReturn) }
     }
 
     // -- Statement compilation ------------------------------------------------
@@ -110,33 +110,33 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
      * loops to emit the loop-back call at the innermost nesting level.
      */
     private fun compileStatements(
-        stmts: List<StatementContext>,
-        w: CodeWriter,
+        statements: List<StatementContext>,
+        writer: CodeWriter,
         onEmpty: (() -> Unit)? = null,
     ) {
-        if (stmts.isEmpty()) {
+        if (statements.isEmpty()) {
             onEmpty?.invoke()
             return
         }
 
-        val stmt = stmts.first()
-        val rest = stmts.subList(1, stmts.size)
+        val statement = statements.first()
+        val rest = statements.subList(1, statements.size)
 
         when {
-            stmt.variableDeclaration() != null ->
-                compileVariableDeclaration(stmt.variableDeclaration(), rest, w, onEmpty)
-            stmt.variableAssignment() != null ->
-                compileAssignment(stmt.variableAssignment(), rest, w, onEmpty)
-            stmt.returnStatement() != null ->
-                compileReturn(stmt.returnStatement(), w)
-            stmt.ifStatement() != null ->
-                compileIf(stmt.ifStatement(), rest, w, onEmpty)
-            stmt.whileStatement() != null ->
-                compileWhile(stmt.whileStatement(), rest, w, onEmpty)
-            stmt.expression() != null ->
-                compileExpressionStatement(stmt.expression(), rest, w, onEmpty)
+            statement.variableDeclaration() != null ->
+                compileVariableDeclaration(statement.variableDeclaration(), rest, writer, onEmpty)
+            statement.variableAssignment() != null ->
+                compileAssignment(statement.variableAssignment(), rest, writer, onEmpty)
+            statement.returnStatement() != null ->
+                compileReturn(statement.returnStatement(), writer)
+            statement.ifStatement() != null ->
+                compileIf(statement.ifStatement(), rest, writer, onEmpty)
+            statement.whileStatement() != null ->
+                compileWhile(statement.whileStatement(), rest, writer, onEmpty)
+            statement.expression() != null ->
+                compileExpressionStatement(statement.expression(), rest, writer, onEmpty)
             else ->
-                error("unsupported statement: ${stmt.text}")
+                error("unsupported statement: ${statement.text}")
         }
     }
 
@@ -148,22 +148,22 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
      * from inside Java lambdas.
      */
     private fun compileVariableDeclaration(
-        decl: VariableDeclarationContext,
+        declaration: VariableDeclarationContext,
         rest: List<StatementContext>,
-        w: CodeWriter,
+        writer: CodeWriter,
         onEmpty: (() -> Unit)?,
     ) {
-        val type = toJavaType(decl.type())
-        val name = decl.IDENTIFIER().text
-        val rhs = decl.expression()
+        val type = toJavaType(declaration.type())
+        val name = declaration.IDENTIFIER().text
+        val initializer = declaration.expression()
 
-        lifter.liftExpression(rhs, w) { value ->
+        lifter.liftExpression(initializer, writer) { value ->
             if (isReassigned(name)) {
-                w.line("$type[] $name = {$value};")
+                writer.line("$type[] $name = {$value};")
             } else {
-                w.line("$type $name = $value;")
+                writer.line("$type $name = $value;")
             }
-            compileStatements(rest, w, onEmpty)
+            compileStatements(rest, writer, onEmpty)
         }
     }
 
@@ -171,38 +171,38 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
     /** Compiles a variable reassignment, writing to `name[0]` for wrapped variables. */
     private fun compileAssignment(
-        assign: VariableAssignmentContext,
+        assignment: VariableAssignmentContext,
         rest: List<StatementContext>,
-        w: CodeWriter,
+        writer: CodeWriter,
         onEmpty: (() -> Unit)?,
     ) {
-        val name = assign.IDENTIFIER().text
-        val rhs = assign.expression()
+        val name = assignment.IDENTIFIER().text
+        val newValue = assignment.expression()
 
-        lifter.liftExpression(rhs, w) { value ->
+        lifter.liftExpression(newValue, writer) { value ->
             if (isReassigned(name)) {
-                w.line("$name[0] = $value;")
+                writer.line("$name[0] = $value;")
             } else {
-                w.line("$name = $value;")
+                writer.line("$name = $value;")
             }
-            compileStatements(rest, w, onEmpty)
+            compileStatements(rest, writer, onEmpty)
         }
     }
 
     // -- Return ---------------------------------------------------------------
 
     /** Compiles a return statement by passing the value to `__continuation`. Subsequent statements are dead code. */
-    private fun compileReturn(ret: ReturnStatementContext, w: CodeWriter) {
-        val expr = ret.expression()
+    private fun compileReturn(returnStmt: ReturnStatementContext, writer: CodeWriter) {
+        val expr = returnStmt.expression()
         if (expr == null) {
-            w.line("__continuation.accept(null);")
-            w.line("return;")
+            writer.line("__continuation.accept(null);")
+            writer.line("return;")
             return
         }
 
-        lifter.liftExpression(expr, w) { value ->
-            w.line("__continuation.accept($value);")
-            w.line("return;")
+        lifter.liftExpression(expr, writer) { value ->
+            writer.line("__continuation.accept($value);")
+            writer.line("return;")
         }
     }
 
@@ -216,17 +216,19 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
     private fun compileIf(
         ifStmt: IfStatementContext,
         rest: List<StatementContext>,
-        w: CodeWriter,
+        writer: CodeWriter,
         onEmpty: (() -> Unit)?,
     ) {
         val condition = ifStmt.expression()
         val blocks = ifStmt.block()
 
-        lifter.liftExpression(condition, w) { cond ->
-            w.block("if ($cond)") { compileStatements(blocks[0].statement() + rest, w, onEmpty) }
+        lifter.liftExpression(condition, writer) { compiledCondition ->
+            writer.block("if ($compiledCondition)") {
+                compileStatements(blocks[0].statement() + rest, writer, onEmpty)
+            }
 
             val elseBody = if (blocks.size > 1) blocks[1].statement() + rest else rest
-            w.block("else") { compileStatements(elseBody, w, onEmpty) }
+            writer.block("else") { compileStatements(elseBody, writer, onEmpty) }
         }
     }
 
@@ -240,7 +242,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
     private fun compileWhile(
         whileStmt: WhileStatementContext,
         rest: List<StatementContext>,
-        w: CodeWriter,
+        writer: CodeWriter,
         onEmpty: (() -> Unit)?,
     ) {
         val loopVar = names.freshLoop()
@@ -248,20 +250,20 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         val condition = whileStmt.expression()
         val body = whileStmt.block().statement()
 
-        w.line("Continuation<Void>[] $loopVar = new Continuation[1];")
-        w.line("$loopVar[0] = ($loopParameter) -> {")
+        writer.line("Continuation<Void>[] $loopVar = new Continuation[1];")
+        writer.line("$loopVar[0] = ($loopParameter) -> {")
 
-        w.indented {
-            lifter.liftExpression(condition, w) { cond ->
-                w.block("if ($cond)") {
-                    compileStatements(body, w) { w.line("$loopVar[0].accept(null);") }
+        writer.indented {
+            lifter.liftExpression(condition, writer) { compiledCondition ->
+                writer.block("if ($compiledCondition)") {
+                    compileStatements(body, writer) { writer.line("$loopVar[0].accept(null);") }
                 }
-                w.block("else") { compileStatements(rest, w, onEmpty) }
+                writer.block("else") { compileStatements(rest, writer, onEmpty) }
             }
         }
 
-        w.line("};")
-        w.line("$loopVar[0].accept(null);")
+        writer.line("};")
+        writer.line("$loopVar[0].accept(null);")
     }
 
     // -- Expression statements ------------------------------------------------
@@ -270,16 +272,16 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
     private fun compileExpressionStatement(
         expr: ExpressionContext,
         rest: List<StatementContext>,
-        w: CodeWriter,
+        writer: CodeWriter,
         onEmpty: (() -> Unit)?,
     ) {
         if (lifter.containsFunctionCall(expr)) {
-            lifter.liftExpression(expr, w) { _ ->
-                compileStatements(rest, w, onEmpty)
+            lifter.liftExpression(expr, writer) { _ ->
+                compileStatements(rest, writer, onEmpty)
             }
         } else {
-            w.line("${expressions.compileExpression(expr)};")
-            compileStatements(rest, w, onEmpty)
+            writer.line("${expressions.compileExpression(expr)};")
+            compileStatements(rest, writer, onEmpty)
         }
     }
 }

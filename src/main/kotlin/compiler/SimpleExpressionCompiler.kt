@@ -35,8 +35,12 @@ internal class SimpleExpressionCompiler(
         else -> error("unsupported expression: ${expr::class.simpleName}")
     }
 
-    private fun compileBinaryOperation(left: ExpressionContext, right: ExpressionContext, op: String): String =
-        "(${compileExpression(left)} $op ${compileExpression(right)})"
+    private fun compileBinaryOperation(
+        left: ExpressionContext,
+        right: ExpressionContext,
+        operatorSymbol: String,
+    ): String =
+        "(${compileExpression(left)} $operatorSymbol ${compileExpression(right)})"
 
     /** Compiles a [PrimaryContext] (literal, identifier, or parenthesised expression) into a Java expression string. */
     fun compilePrimary(primary: PrimaryContext): String = when (primary) {

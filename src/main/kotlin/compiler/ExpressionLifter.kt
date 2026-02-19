@@ -45,8 +45,8 @@ internal class ExpressionLifter(
     fun containsFunctionCall(expr: ExpressionContext): Boolean = when (expr) {
         is FunctionCallExprContext -> true
         is PrimaryExprContext -> {
-            val p = expr.primary()
-            p is ParenExprContext && containsFunctionCall(p.expression())
+            val primary = expr.primary()
+            primary is ParenExprContext && containsFunctionCall(primary.expression())
         }
         is NotExprContext -> containsFunctionCall(expr.expression())
         is AddSubExprContext,
@@ -68,7 +68,7 @@ internal class ExpressionLifter(
      */
     fun liftExpression(
         expr: ExpressionContext,
-        w: CodeWriter,
+        writer: CodeWriter,
         then: (simpleExpr: String) -> Unit,
     ) {
         if (!containsFunctionCall(expr)) {
@@ -78,28 +78,28 @@ internal class ExpressionLifter(
 
         when (expr) {
             is FunctionCallExprContext -> {
-                val name = expr.IDENTIFIER().text
-                val args = expr.argumentList().expression()
-                liftExpressionList(args, w) { liftedArgs ->
+                val functionName = expr.IDENTIFIER().text
+                val arguments = expr.argumentList().expression()
+                liftExpressionList(arguments, writer) { liftedArgs ->
                     val resultParam = names.freshArg()
-                    if (name == "println") {
-                        w.line("Prelude.println(${liftedArgs[0]}, ($resultParam) -> {")
+                    if (functionName == "println") {
+                        writer.line("Prelude.println(${liftedArgs[0]}, ($resultParam) -> {")
                     } else {
-                        w.line("$name(${liftedArgs.joinToString(", ")}, ($resultParam) -> {")
+                        writer.line("$functionName(${liftedArgs.joinToString(", ")}, ($resultParam) -> {")
                     }
-                    w.indented { then(resultParam) }
-                    w.line("});")
+                    writer.indented { then(resultParam) }
+                    writer.line("});")
                 }
             }
             is AddSubExprContext ->
-                liftBinaryOperation(expr.expression(0), expr.expression(1), operatorOf(expr), w, then)
+                liftBinaryOperation(expr.expression(0), expr.expression(1), operatorOf(expr), writer, then)
             is MulDivExprContext ->
-                liftBinaryOperation(expr.expression(0), expr.expression(1), operatorOf(expr), w, then)
+                liftBinaryOperation(expr.expression(0), expr.expression(1), operatorOf(expr), writer, then)
             is ComparisonExprContext ->
-                liftBinaryOperation(expr.expression(0), expr.expression(1), operatorOf(expr), w, then)
+                liftBinaryOperation(expr.expression(0), expr.expression(1), operatorOf(expr), writer, then)
             is EqualityExprContext -> {
-                liftExpression(expr.expression(0), w) { left ->
-                    liftExpression(expr.expression(1), w) { right ->
+                liftExpression(expr.expression(0), writer) { left ->
+                    liftExpression(expr.expression(1), writer) { right ->
                         val result = if (expr.EQ() != null)
                             "java.util.Objects.equals($left, $right)"
                         else
@@ -113,35 +113,35 @@ internal class ExpressionLifter(
                 val leftExpr = expr.expression(0)
                 val rightExpr = expr.expression(1)
                 if (containsFunctionCall(rightExpr)) {
-                    liftExpression(leftExpr, w) { leftVal ->
-                        w.block("if ($leftVal)") { liftExpression(rightExpr, w, then) }
-                        w.block("else") { then("false") }
+                    liftExpression(leftExpr, writer) { leftVal ->
+                        writer.block("if ($leftVal)") { liftExpression(rightExpr, writer, then) }
+                        writer.block("else") { then("false") }
                     }
                 } else {
-                    liftBinaryOperation(leftExpr, rightExpr, "&&", w, then)
+                    liftBinaryOperation(leftExpr, rightExpr, "&&", writer, then)
                 }
             }
             is OrExprContext -> {
                 val leftExpr = expr.expression(0)
                 val rightExpr = expr.expression(1)
                 if (containsFunctionCall(rightExpr)) {
-                    liftExpression(leftExpr, w) { leftVal ->
-                        w.block("if ($leftVal)") { then("true") }
-                        w.block("else") { liftExpression(rightExpr, w, then) }
+                    liftExpression(leftExpr, writer) { leftVal ->
+                        writer.block("if ($leftVal)") { then("true") }
+                        writer.block("else") { liftExpression(rightExpr, writer, then) }
                     }
                 } else {
-                    liftBinaryOperation(leftExpr, rightExpr, "||", w, then)
+                    liftBinaryOperation(leftExpr, rightExpr, "||", writer, then)
                 }
             }
             is NotExprContext -> {
-                liftExpression(expr.expression(), w) { inner -> then("(!$inner)") }
+                liftExpression(expr.expression(), writer) { inner -> then("(!$inner)") }
             }
             is PrimaryExprContext -> {
-                val p = expr.primary()
-                if (p is ParenExprContext) {
-                    liftExpression(p.expression(), w) { inner -> then("($inner)") }
+                val primary = expr.primary()
+                if (primary is ParenExprContext) {
+                    liftExpression(primary.expression(), writer) { inner -> then("($inner)") }
                 } else {
-                    then(expressions.compilePrimary(p))
+                    then(expressions.compilePrimary(primary))
                 }
             }
             else -> then(expressions.compileExpression(expr))
@@ -152,13 +152,13 @@ internal class ExpressionLifter(
     private fun liftBinaryOperation(
         left: ExpressionContext,
         right: ExpressionContext,
-        op: String,
-        w: CodeWriter,
+        operatorSymbol: String,
+        writer: CodeWriter,
         then: (String) -> Unit,
     ) {
-        liftExpression(left, w) { leftValue ->
-            liftExpression(right, w) { rightValue ->
-                then("($leftValue $op $rightValue)")
+        liftExpression(left, writer) { leftValue ->
+            liftExpression(right, writer) { rightValue ->
+                then("($leftValue $operatorSymbol $rightValue)")
             }
         }
     }
@@ -166,18 +166,18 @@ internal class ExpressionLifter(
     /** Lifts a list of expressions left-to-right, collecting simple results. */
     private fun liftExpressionList(
         exprs: List<ExpressionContext>,
-        w: CodeWriter,
+        writer: CodeWriter,
         then: (liftedExprs: List<String>) -> Unit,
     ) {
-        fun go(index: Int, acc: List<String>) {
+        fun liftAt(index: Int, results: List<String>) {
             if (index >= exprs.size) {
-                then(acc)
+                then(results)
             } else {
-                liftExpression(exprs[index], w) { lifted ->
-                    go(index + 1, acc + lifted)
+                liftExpression(exprs[index], writer) { lifted ->
+                    liftAt(index + 1, results + lifted)
                 }
             }
         }
-        go(0, emptyList())
+        liftAt(0, emptyList())
     }
 }

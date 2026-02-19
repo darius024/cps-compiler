@@ -3,11 +3,11 @@ package org.example.compiler
 /** Encapsulates indented Java source code emission. */
 internal class CodeWriter {
     private val buffer = StringBuilder()
-    private var depth = 0
+    private var indentDepth = 0
 
     /** Emits a line of code at the current indentation depth. */
     fun line(text: String) {
-        buffer.appendLine("${"  ".repeat(depth)}$text")
+        buffer.appendLine("${INDENT.repeat(indentDepth)}$text")
     }
 
     /** Emits a blank line. */
@@ -22,12 +22,16 @@ internal class CodeWriter {
         line("}")
     }
 
-    /** Runs [block] with the indentation depth increased by one. */
-    fun indented(block: () -> Unit) {
-        depth++
-        block()
-        depth--
+    /** Runs [body] with the indentation depth increased by one. */
+    fun indented(body: () -> Unit) {
+        indentDepth++
+        body()
+        indentDepth--
     }
 
     override fun toString(): String = buffer.toString()
+
+    companion object {
+        private const val INDENT = "  "
+    }
 }
