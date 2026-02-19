@@ -207,18 +207,20 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         out: StringBuilder,
         onEmpty: ((Int) -> Unit)?,
     ) {
-        val pad = "  ".repeat(indent)
-        val cond = compileExpression(ifStmt.expression())
+        val condExpr = ifStmt.expression()
         val blocks = ifStmt.block()
 
-        out.appendLine("${pad}if ($cond) {")
-        compileStatements(blocks[0].statement() + rest, indent + 1, out, onEmpty)
-        out.appendLine("${pad}}")
+        liftExpression(condExpr, indent, out) { cond, condIndent ->
+            val pad = "  ".repeat(condIndent)
+            out.appendLine("${pad}if ($cond) {")
+            compileStatements(blocks[0].statement() + rest, condIndent + 1, out, onEmpty)
+            out.appendLine("${pad}}")
 
-        val elseBody = if (blocks.size > 1) blocks[1].statement() + rest else rest
-        out.appendLine("${pad}else {")
-        compileStatements(elseBody, indent + 1, out, onEmpty)
-        out.appendLine("${pad}}")
+            val elseBody = if (blocks.size > 1) blocks[1].statement() + rest else rest
+            out.appendLine("${pad}else {")
+            compileStatements(elseBody, condIndent + 1, out, onEmpty)
+            out.appendLine("${pad}}")
+        }
     }
 
     // -- While loops ----------------------------------------------------------
@@ -238,22 +240,24 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         val pad = "  ".repeat(indent)
         val loopVar = freshLoop()
         val unusedParam = freshArg()
-        val cond = compileExpression(whileStmt.expression())
+        val condExpr = whileStmt.expression()
         val body = whileStmt.block().statement()
 
         out.appendLine("${pad}Continuation<Void>[] $loopVar = new Continuation[1];")
         out.appendLine("${pad}$loopVar[0] = ($unusedParam) -> {")
 
-        out.appendLine("${pad}  if ($cond) {")
-        compileStatements(body, indent + 2, out) { loopBackIndent ->
-            val lp = "  ".repeat(loopBackIndent)
-            out.appendLine("${lp}$loopVar[0].accept(null);")
+        liftExpression(condExpr, indent + 1, out) { cond, condIndent ->
+            val cp = "  ".repeat(condIndent)
+            out.appendLine("${cp}if ($cond) {")
+            compileStatements(body, condIndent + 1, out) { loopBackIndent ->
+                val lp = "  ".repeat(loopBackIndent)
+                out.appendLine("${lp}$loopVar[0].accept(null);")
+            }
+            out.appendLine("${cp}}")
+            out.appendLine("${cp}else {")
+            compileStatements(rest, condIndent + 1, out, onEmpty)
+            out.appendLine("${cp}}")
         }
-        out.appendLine("${pad}  }")
-
-        out.appendLine("${pad}  else {")
-        compileStatements(rest, indent + 2, out, onEmpty)
-        out.appendLine("${pad}  }")
 
         out.appendLine("${pad}};")
         out.appendLine("${pad}$loopVar[0].accept(null);")
@@ -303,7 +307,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         is EqualityExprContext,
         is AndExprContext,
         is OrExprContext -> {
-            val children = (expr as ExpressionContext).children
+            val children = expr.children
                 .filterIsInstance<ExpressionContext>()
             children.any { containsFunctionCall(it) }
         }
@@ -366,8 +370,42 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
                     }
                 }
             }
-            is AndExprContext  -> liftBinaryOp(expr.expression(0), expr.expression(1), "&&", indent, out, then)
-            is OrExprContext   -> liftBinaryOp(expr.expression(0), expr.expression(1), "||", indent, out, then)
+            is AndExprContext -> {
+                val leftExpr = expr.expression(0)
+                val rightExpr = expr.expression(1)
+                if (containsFunctionCall(rightExpr)) {
+                    liftExpression(leftExpr, indent, out) { leftVal, leftIndent ->
+                        val pad = "  ".repeat(leftIndent)
+                        out.appendLine("${pad}if ($leftVal) {")
+                        liftExpression(rightExpr, leftIndent + 1, out) { rightVal, rightIndent ->
+                            then(rightVal, rightIndent)
+                        }
+                        out.appendLine("${pad}} else {")
+                        then("false", leftIndent + 1)
+                        out.appendLine("${pad}}")
+                    }
+                } else {
+                    liftBinaryOp(leftExpr, rightExpr, "&&", indent, out, then)
+                }
+            }
+            is OrExprContext -> {
+                val leftExpr = expr.expression(0)
+                val rightExpr = expr.expression(1)
+                if (containsFunctionCall(rightExpr)) {
+                    liftExpression(leftExpr, indent, out) { leftVal, leftIndent ->
+                        val pad = "  ".repeat(leftIndent)
+                        out.appendLine("${pad}if ($leftVal) {")
+                        then("true", leftIndent + 1)
+                        out.appendLine("${pad}} else {")
+                        liftExpression(rightExpr, leftIndent + 1, out) { rightVal, rightIndent ->
+                            then(rightVal, rightIndent)
+                        }
+                        out.appendLine("${pad}}")
+                    }
+                } else {
+                    liftBinaryOp(leftExpr, rightExpr, "||", indent, out, then)
+                }
+            }
             is NotExprContext  -> {
                 liftExpression(expr.expression(), indent, out) { inner, innerIndent ->
                     then("(!$inner)", innerIndent)
