@@ -60,7 +60,12 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
             out.appendLine("${pad}public static void $name(${params.joinToString(", ")}) {")
         }
 
-        compileStatements(fn.block().statement(), indent + 1, out)
+        val implicitReturn: ((Int) -> Unit)? = if (name != "main") { innerIndent ->
+            val ip = "  ".repeat(innerIndent)
+            out.appendLine("${ip}__continuation.accept(null);")
+        } else null
+
+        compileStatements(fn.block().statement(), indent + 1, out, implicitReturn)
         out.appendLine("${pad}}")
     }
 

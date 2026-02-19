@@ -548,6 +548,136 @@ class MiniKotlinCompilerTest {
         """))
     }
 
+    // -- Recursive functions --------------------------------------------------
+
+    @Test
+    fun `fibonacci`() {
+        assertEquals("55\n", compileAndRun("""
+            fun fib(n: Int): Int {
+                if (n <= 1) {
+                    return n
+                } else {
+                    return fib(n - 1) + fib(n - 2)
+                }
+            }
+            fun main(): Unit {
+                println(fib(10))
+            }
+        """))
+    }
+
+    @Test
+    fun `mutual recursion`() {
+        assertEquals("true\nfalse\n", compileAndRun("""
+            fun isEven(n: Int): Boolean {
+                if (n == 0) {
+                    return true
+                } else {
+                    return isOdd(n - 1)
+                }
+            }
+            fun isOdd(n: Int): Boolean {
+                if (n == 0) {
+                    return false
+                } else {
+                    return isEven(n - 1)
+                }
+            }
+            fun main(): Unit {
+                var a: Boolean = isEven(4)
+                println(a)
+                var b: Boolean = isEven(3)
+                println(b)
+            }
+        """))
+    }
+
+    // -- Edge cases -----------------------------------------------------------
+
+    @Test
+    fun `empty unit function body`() {
+        assertEquals("", compileAndRun("""
+            fun doNothing(x: Int): Unit {
+            }
+            fun main(): Unit {
+                doNothing(1)
+            }
+        """))
+    }
+
+    @Test
+    fun `string println`() {
+        assertEquals("hello world\n", compileAndRun("""
+            fun main(): Unit {
+                println("hello world")
+            }
+        """))
+    }
+
+    @Test
+    fun `chained function calls as statements`() {
+        assertEquals("1\n2\n3\n", compileAndRun("""
+            fun printVal(n: Int): Unit {
+                println(n)
+            }
+            fun main(): Unit {
+                printVal(1)
+                printVal(2)
+                printVal(3)
+            }
+        """))
+    }
+
+    @Test
+    fun `while loop with function call in condition expression`() {
+        assertEquals("3\n2\n1\n", compileAndRun("""
+            fun isPositive(n: Int): Boolean {
+                if (n > 0) {
+                    return true
+                } else {
+                    return false
+                }
+            }
+            fun main(): Unit {
+                var i: Int = 3
+                while (i > 0) {
+                    println(i)
+                    i = i - 1
+                }
+            }
+        """))
+    }
+
+    @Test
+    fun `nested if inside while`() {
+        assertEquals("1\n3\n5\n", compileAndRun("""
+            fun main(): Unit {
+                var i: Int = 1
+                while (i <= 5) {
+                    if (i % 2 == 1) {
+                        println(i)
+                    }
+                    i = i + 1
+                }
+            }
+        """))
+    }
+
+    @Test
+    fun `function returning result of another function`() {
+        assertEquals("6\n", compileAndRun("""
+            fun addOne(n: Int): Int {
+                return n + 1
+            }
+            fun addTwo(n: Int): Int {
+                return addOne(addOne(n))
+            }
+            fun main(): Unit {
+                println(addTwo(4))
+            }
+        """))
+    }
+
     // -- Integration (existing) -----------------------------------------------
 
     @Test
