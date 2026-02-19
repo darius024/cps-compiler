@@ -4,6 +4,9 @@
  * Translates a MiniKotlin program (parsed by ANTLR) into Java source code
  * where every function call uses continuation-passing style. The generated
  * code depends on the stdlib's Continuation<T> interface and Prelude class.
+ *
+ * The core idea: after every function call the remaining computation moves
+ * into a continuation lambda, turning sequential code into nested callbacks.
  */
 
 package org.example.compiler
@@ -22,7 +25,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
     fun compile(program: ProgramContext, className: String = "MiniProgram"): String {
         argCounter = 0
-        val body = buildString {
+        return buildString {
             appendLine("public class $className {")
             for (fn in program.functionDeclaration()) {
                 appendLine()
@@ -30,7 +33,6 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
             }
             appendLine("}")
         }
-        return body
     }
 
     // -- Function compilation -------------------------------------------------
@@ -41,8 +43,6 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
         if (name == "main") {
             out.appendLine("${pad}public static void main(String[] args) {")
-            compileStatements(fn.block().statement(), indent + 1, out)
-            out.appendLine("${pad}}")
         } else {
             val returnType = mapType(fn.type())
             val params = buildList {
@@ -52,9 +52,10 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
                 add("Continuation<$returnType> __continuation")
             }
             out.appendLine("${pad}public static void $name(${params.joinToString(", ")}) {")
-            compileStatements(fn.block().statement(), indent + 1, out)
-            out.appendLine("${pad}}")
         }
+
+        compileStatements(fn.block().statement(), indent + 1, out)
+        out.appendLine("${pad}}")
     }
 
     // -- Statement compilation ------------------------------------------------
@@ -72,61 +73,54 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
         val stmt = stmts.first()
         val rest = stmts.subList(1, stmts.size)
+
+        when {
+            stmt.variableDeclaration() != null ->
+                compileVarDecl(stmt.variableDeclaration(), rest, indent, out)
+            stmt.returnStatement() != null ->
+                compileReturn(stmt.returnStatement(), indent, out)
+            stmt.ifStatement() != null ->
+                compileIf(stmt.ifStatement(), rest, indent, out)
+            stmt.expression() is FunctionCallExprContext ->
+                emitCpsCall(stmt.expression() as FunctionCallExprContext, rest, indent, out)
+            else ->
+                TODO("statement type: ${stmt.text}")
+        }
+    }
+
+    // -- Variable declarations ------------------------------------------------
+
+    private fun compileVarDecl(
+        decl: VariableDeclarationContext,
+        rest: List<StatementContext>,
+        indent: Int,
+        out: StringBuilder,
+    ) {
+        val type = mapType(decl.type())
+        val name = decl.IDENTIFIER().text
         val pad = "  ".repeat(indent)
+        val rhs = decl.expression()
 
-        val varDecl = stmt.variableDeclaration()
-        if (varDecl != null) {
-            val type = mapType(varDecl.type())
-            val name = varDecl.IDENTIFIER().text
-            val rhs = varDecl.expression()
-
-            if (rhs is FunctionCallExprContext) {
-                val fnName = rhs.IDENTIFIER().text
-                val args = rhs.argumentList().expression()
-                val contParam = freshArg()
-                if (fnName == "println") {
-                    val arg = compileExpression(args[0])
-                    out.appendLine("${pad}Prelude.println($arg, ($contParam) -> {")
-                } else {
-                    val compiledArgs = args.joinToString(", ") { compileExpression(it) }
-                    out.appendLine("${pad}$fnName($compiledArgs, ($contParam) -> {")
-                }
-                out.appendLine("${pad}  $type $name = $contParam;")
-                compileStatements(rest, indent + 1, out)
-                out.appendLine("${pad}});")
-            } else {
-                val value = compileExpression(rhs)
-                out.appendLine("${pad}$type $name = $value;")
-                compileStatements(rest, indent, out)
-            }
-            return
+        if (rhs is FunctionCallExprContext) {
+            val contParam = freshArg()
+            emitCpsCallOpen(rhs, contParam, indent, out)
+            out.appendLine("${pad}  $type $name = $contParam;")
+            compileStatements(rest, indent + 1, out)
+            out.appendLine("${pad}});")
+        } else {
+            out.appendLine("${pad}$type $name = ${compileExpression(rhs)};")
+            compileStatements(rest, indent, out)
         }
+    }
 
-        val retStmt = stmt.returnStatement()
-        if (retStmt != null) {
-            val retExpr = retStmt.expression()
-            if (retExpr != null) {
-                out.appendLine("${pad}__continuation.accept(${compileExpression(retExpr)});")
-            } else {
-                out.appendLine("${pad}__continuation.accept(null);")
-            }
-            out.appendLine("${pad}return;")
-            return
-        }
+    // -- Return ---------------------------------------------------------------
 
-        val ifStmt = stmt.ifStatement()
-        if (ifStmt != null) {
-            compileIf(ifStmt, rest, indent, out)
-            return
-        }
-
-        val expr = stmt.expression()
-        if (expr != null && expr is FunctionCallExprContext) {
-            compileFunctionCallStatement(expr, rest, indent, out)
-            return
-        }
-
-        TODO("statement type: ${stmt.text}")
+    private fun compileReturn(ret: ReturnStatementContext, indent: Int, out: StringBuilder) {
+        val pad = "  ".repeat(indent)
+        val expr = ret.expression()
+        val value = if (expr != null) compileExpression(expr) else "null"
+        out.appendLine("${pad}__continuation.accept($value);")
+        out.appendLine("${pad}return;")
     }
 
     // -- If/else --------------------------------------------------------------
@@ -150,22 +144,21 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         compileStatements(blocks[0].statement() + rest, indent + 1, out)
         out.appendLine("${pad}}")
 
-        if (blocks.size > 1) {
-            out.appendLine("${pad}else {")
-            compileStatements(blocks[1].statement() + rest, indent + 1, out)
-            out.appendLine("${pad}}")
-        } else {
-            out.appendLine("${pad}else {")
-            compileStatements(rest, indent + 1, out)
-            out.appendLine("${pad}}")
-        }
+        val elseBody = if (blocks.size > 1) blocks[1].statement() + rest else rest
+        out.appendLine("${pad}else {")
+        compileStatements(elseBody, indent + 1, out)
+        out.appendLine("${pad}}")
     }
 
-    // -- Function call statements ---------------------------------------------
+    // -- CPS function calls ---------------------------------------------------
 
-    private fun compileFunctionCallStatement(
+    /**
+     * Emits the opening line of a CPS call: `name(args, (contParam) -> {`
+     * Handles println specially (routed through Prelude).
+     */
+    private fun emitCpsCallOpen(
         call: FunctionCallExprContext,
-        rest: List<StatementContext>,
+        contParam: String,
         indent: Int,
         out: StringBuilder,
     ) {
@@ -173,14 +166,24 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         val args = call.argumentList().expression()
         val pad = "  ".repeat(indent)
 
-        val contParam = freshArg()
         if (name == "println") {
-            val arg = compileExpression(args[0])
-            out.appendLine("${pad}Prelude.println($arg, ($contParam) -> {")
+            out.appendLine("${pad}Prelude.println(${compileExpression(args[0])}, ($contParam) -> {")
         } else {
             val compiledArgs = args.joinToString(", ") { compileExpression(it) }
             out.appendLine("${pad}$name($compiledArgs, ($contParam) -> {")
         }
+    }
+
+    /** Emits a complete CPS call as a statement, nesting the rest inside. */
+    private fun emitCpsCall(
+        call: FunctionCallExprContext,
+        rest: List<StatementContext>,
+        indent: Int,
+        out: StringBuilder,
+    ) {
+        val pad = "  ".repeat(indent)
+        val contParam = freshArg()
+        emitCpsCallOpen(call, contParam, indent, out)
         compileStatements(rest, indent + 1, out)
         out.appendLine("${pad}});")
     }
@@ -199,27 +202,19 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
     private fun compileExpression(expr: ExpressionContext): String = when (expr) {
         is PrimaryExprContext -> compilePrimary(expr.primary())
-        is AddSubExprContext -> {
-            val op = if (expr.PLUS() != null) "+" else "-"
-            "(${compileExpression(expr.expression(0))} $op ${compileExpression(expr.expression(1))})"
-        }
-        is MulDivExprContext -> {
-            val op = when {
-                expr.MULT() != null -> "*"
-                expr.DIV() != null  -> "/"
-                else                -> "%"
-            }
-            "(${compileExpression(expr.expression(0))} $op ${compileExpression(expr.expression(1))})"
-        }
-        is ComparisonExprContext -> {
-            val op = when {
-                expr.LT() != null -> "<"
-                expr.GT() != null -> ">"
-                expr.LE() != null -> "<="
-                else              -> ">="
-            }
-            "(${compileExpression(expr.expression(0))} $op ${compileExpression(expr.expression(1))})"
-        }
+        is AddSubExprContext -> compileBinaryOp(expr.expression(0), expr.expression(1),
+            if (expr.PLUS() != null) "+" else "-")
+        is MulDivExprContext -> compileBinaryOp(expr.expression(0), expr.expression(1), when {
+            expr.MULT() != null -> "*"
+            expr.DIV() != null  -> "/"
+            else                -> "%"
+        })
+        is ComparisonExprContext -> compileBinaryOp(expr.expression(0), expr.expression(1), when {
+            expr.LT() != null -> "<"
+            expr.GT() != null -> ">"
+            expr.LE() != null -> "<="
+            else              -> ">="
+        })
         is EqualityExprContext -> {
             val left = compileExpression(expr.expression(0))
             val right = compileExpression(expr.expression(1))
@@ -228,14 +223,14 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
             else
                 "!java.util.Objects.equals($left, $right)"
         }
-        is AndExprContext ->
-            "(${compileExpression(expr.expression(0))} && ${compileExpression(expr.expression(1))})"
-        is OrExprContext ->
-            "(${compileExpression(expr.expression(0))} || ${compileExpression(expr.expression(1))})"
-        is NotExprContext ->
-            "(!${compileExpression(expr.expression())})"
+        is AndExprContext  -> compileBinaryOp(expr.expression(0), expr.expression(1), "&&")
+        is OrExprContext   -> compileBinaryOp(expr.expression(0), expr.expression(1), "||")
+        is NotExprContext  -> "(!${compileExpression(expr.expression())})"
         else -> TODO("expression type: ${expr::class.simpleName}")
     }
+
+    private fun compileBinaryOp(left: ExpressionContext, right: ExpressionContext, op: String): String =
+        "(${compileExpression(left)} $op ${compileExpression(right)})"
 
     private fun compilePrimary(primary: PrimaryContext): String = when (primary) {
         is IntLiteralContext -> primary.INTEGER_LITERAL().text
