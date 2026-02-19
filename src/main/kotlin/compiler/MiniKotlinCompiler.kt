@@ -17,11 +17,8 @@ import MiniKotlinParser.*
 
 class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
 
-    /** Counter for generating unique continuation parameter names (arg0, arg1, …). */
-    private var argCounter = 0
-
-    /** Counter for generating unique loop continuation names (__loop_0, __loop_1, …). */
-    private var loopCounter = 0
+    private val names = NameSupply()
+    private val lifter = ExpressionLifter(::compileExpression, ::compilePrimary, names)
 
     /**
      * Variables in the current function that are targets of assignment statements.
@@ -30,16 +27,11 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
      */
     private var reassignedVariables = emptySet<String>()
 
-    private fun freshArg(): String = "arg${argCounter++}"
-
-    private fun freshLoop(): String = "__loop_${loopCounter++}"
-
     // -- Entry point ----------------------------------------------------------
 
     /** Compiles a complete MiniKotlin program into a single Java class with CPS-transformed functions. */
     fun compile(program: ProgramContext, className: String = "MiniProgram"): String {
-        argCounter = 0
-        loopCounter = 0
+        names.reset()
         val w = CodeWriter()
         w.line("public class $className {")
         w.indented {
@@ -164,7 +156,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         val name = decl.IDENTIFIER().text
         val rhs = decl.expression()
 
-        liftExpression(rhs, w) { value ->
+        lifter.liftExpression(rhs, w) { value ->
             if (isReassigned(name)) {
                 w.line("$type[] $name = {$value};")
             } else {
@@ -186,7 +178,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         val name = assign.IDENTIFIER().text
         val rhs = assign.expression()
 
-        liftExpression(rhs, w) { value ->
+        lifter.liftExpression(rhs, w) { value ->
             if (isReassigned(name)) {
                 w.line("$name[0] = $value;")
             } else {
@@ -207,7 +199,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
             return
         }
 
-        liftExpression(expr, w) { value ->
+        lifter.liftExpression(expr, w) { value ->
             w.line("__continuation.accept($value);")
             w.line("return;")
         }
@@ -229,7 +221,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         val condition = ifStmt.expression()
         val blocks = ifStmt.block()
 
-        liftExpression(condition, w) { cond ->
+        lifter.liftExpression(condition, w) { cond ->
             w.line("if ($cond) {")
             w.indented { compileStatements(blocks[0].statement() + rest, w, onEmpty) }
             w.line("}")
@@ -254,8 +246,8 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         w: CodeWriter,
         onEmpty: (() -> Unit)?,
     ) {
-        val loopVar = freshLoop()
-        val loopParameter = freshArg()
+        val loopVar = names.freshLoop()
+        val loopParameter = names.freshArg()
         val condition = whileStmt.expression()
         val body = whileStmt.block().statement()
 
@@ -263,7 +255,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         w.line("$loopVar[0] = ($loopParameter) -> {")
 
         w.indented {
-            liftExpression(condition, w) { cond ->
+            lifter.liftExpression(condition, w) { cond ->
                 w.line("if ($cond) {")
                 w.indented {
                     compileStatements(body, w) { w.line("$loopVar[0].accept(null);") }
@@ -288,190 +280,14 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         w: CodeWriter,
         onEmpty: (() -> Unit)?,
     ) {
-        if (containsFunctionCall(expr)) {
-            liftExpression(expr, w) { _ ->
+        if (lifter.containsFunctionCall(expr)) {
+            lifter.liftExpression(expr, w) { _ ->
                 compileStatements(rest, w, onEmpty)
             }
         } else {
             w.line("${compileExpression(expr)};")
             compileStatements(rest, w, onEmpty)
         }
-    }
-
-    // -- Expression lifting ---------------------------------------------------
-    //
-    // When an expression contains function calls, we cannot compile it as a
-    // single Java expression. Instead we "lift" calls out: each call becomes
-    // a CPS invocation whose continuation receives the result in a fresh
-    // variable, and the rest of the expression is rebuilt using those variables.
-    //
-    // liftExpression walks the expression tree. For sub-trees without calls it
-    // compiles directly. For calls it emits CPS code and passes the temp
-    // variable into the [then] callback.
-
-    /** Recursively checks whether an expression tree contains any function call. */
-    private fun containsFunctionCall(expr: ExpressionContext): Boolean = when (expr) {
-        is FunctionCallExprContext -> true
-        is PrimaryExprContext -> {
-            val p = expr.primary()
-            p is ParenExprContext && containsFunctionCall(p.expression())
-        }
-        is NotExprContext -> containsFunctionCall(expr.expression())
-        is AddSubExprContext,
-        is MulDivExprContext,
-        is ComparisonExprContext,
-        is EqualityExprContext,
-        is AndExprContext,
-        is OrExprContext -> {
-            val children = expr.children
-                .filterIsInstance<ExpressionContext>()
-            children.any { containsFunctionCall(it) }
-        }
-        else -> false
-    }
-
-    /**
-     * Lifts function calls out of [expr] into CPS calls, then invokes [then]
-     * with a simple Java expression string (no remaining calls).
-     */
-    private fun liftExpression(
-        expr: ExpressionContext,
-        w: CodeWriter,
-        then: (simpleExpr: String) -> Unit,
-    ) {
-        if (!containsFunctionCall(expr)) {
-            then(compileExpression(expr))
-            return
-        }
-
-        when (expr) {
-            is FunctionCallExprContext -> {
-                val name = expr.IDENTIFIER().text
-                val args = expr.argumentList().expression()
-                liftExpressionList(args, w) { liftedArgs ->
-                    val resultParam = freshArg()
-                    if (name == "println") {
-                        w.line("Prelude.println(${liftedArgs[0]}, ($resultParam) -> {")
-                    } else {
-                        w.line("$name(${liftedArgs.joinToString(", ")}, ($resultParam) -> {")
-                    }
-                    w.indented { then(resultParam) }
-                    w.line("});")
-                }
-            }
-            is AddSubExprContext ->
-                liftBinaryOperation(expr.expression(0), expr.expression(1), operatorOf(expr), w, then)
-            is MulDivExprContext ->
-                liftBinaryOperation(expr.expression(0), expr.expression(1), operatorOf(expr), w, then)
-            is ComparisonExprContext ->
-                liftBinaryOperation(expr.expression(0), expr.expression(1), operatorOf(expr), w, then)
-            is EqualityExprContext -> {
-                liftExpression(expr.expression(0), w) { left ->
-                    liftExpression(expr.expression(1), w) { right ->
-                        val result = if (expr.EQ() != null)
-                            "java.util.Objects.equals($left, $right)"
-                        else
-                            "!java.util.Objects.equals($left, $right)"
-                        then(result)
-                    }
-                }
-            }
-            // Short-circuit: branch to avoid eagerly evaluating the RHS when it has calls.
-            is AndExprContext -> {
-                val leftExpr = expr.expression(0)
-                val rightExpr = expr.expression(1)
-                if (containsFunctionCall(rightExpr)) {
-                    liftExpression(leftExpr, w) { leftVal ->
-                        w.line("if ($leftVal) {")
-                        w.indented { liftExpression(rightExpr, w, then) }
-                        w.line("} else {")
-                        w.indented { then("false") }
-                        w.line("}")
-                    }
-                } else {
-                    liftBinaryOperation(leftExpr, rightExpr, "&&", w, then)
-                }
-            }
-            is OrExprContext -> {
-                val leftExpr = expr.expression(0)
-                val rightExpr = expr.expression(1)
-                if (containsFunctionCall(rightExpr)) {
-                    liftExpression(leftExpr, w) { leftVal ->
-                        w.line("if ($leftVal) {")
-                        w.indented { then("true") }
-                        w.line("} else {")
-                        w.indented { liftExpression(rightExpr, w, then) }
-                        w.line("}")
-                    }
-                } else {
-                    liftBinaryOperation(leftExpr, rightExpr, "||", w, then)
-                }
-            }
-            is NotExprContext -> {
-                liftExpression(expr.expression(), w) { inner -> then("(!$inner)") }
-            }
-            is PrimaryExprContext -> {
-                val p = expr.primary()
-                if (p is ParenExprContext) {
-                    liftExpression(p.expression(), w) { inner -> then("($inner)") }
-                } else {
-                    then(compilePrimary(p))
-                }
-            }
-            else -> then(compileExpression(expr))
-        }
-    }
-
-    /** Lifts both operands of a binary operator left-to-right, then combines them. */
-    private fun liftBinaryOperation(
-        left: ExpressionContext,
-        right: ExpressionContext,
-        op: String,
-        w: CodeWriter,
-        then: (String) -> Unit,
-    ) {
-        liftExpression(left, w) { leftValue ->
-            liftExpression(right, w) { rightValue ->
-                then("($leftValue $op $rightValue)")
-            }
-        }
-    }
-
-    /** Lifts a list of expressions left-to-right, collecting simple results. */
-    private fun liftExpressionList(
-        exprs: List<ExpressionContext>,
-        w: CodeWriter,
-        then: (liftedExprs: List<String>) -> Unit,
-    ) {
-        fun go(index: Int, acc: List<String>) {
-            if (index >= exprs.size) {
-                then(acc)
-            } else {
-                liftExpression(exprs[index], w) { lifted ->
-                    go(index + 1, acc + lifted)
-                }
-            }
-        }
-        go(0, emptyList())
-    }
-
-    // -- Operator mapping -----------------------------------------------------
-
-    /** Maps an arithmetic or comparison expression node to its Java operator string. */
-    private fun operatorOf(expr: ExpressionContext): String = when (expr) {
-        is AddSubExprContext -> if (expr.PLUS() != null) "+" else "-"
-        is MulDivExprContext -> when {
-            expr.MULT() != null -> "*"
-            expr.DIV() != null  -> "/"
-            else                -> "%"
-        }
-        is ComparisonExprContext -> when {
-            expr.LT() != null -> "<"
-            expr.GT() != null -> ">"
-            expr.LE() != null -> "<="
-            else              -> ">="
-        }
-        else -> error("not a binary operator: ${expr::class.simpleName}")
     }
 
     // -- Type mapping ---------------------------------------------------------
@@ -490,7 +306,8 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
     /**
      * Compiles an expression that is guaranteed to contain no function calls
      * into a single Java expression string. Throws if a function call is
-     * encountered — use [liftExpression] for expressions that may contain calls.
+     * encountered — use [ExpressionLifter.liftExpression] for expressions
+     * that may contain calls.
      */
     private fun compileExpression(expr: ExpressionContext): String = when (expr) {
         is PrimaryExprContext -> compilePrimary(expr.primary())
@@ -531,29 +348,4 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         is ParenExprContext -> "(${compileExpression(primary.expression())})"
         else -> error("unsupported primary: ${primary::class.simpleName}")
     }
-}
-
-/** Encapsulates indented Java source code emission. */
-private class CodeWriter {
-    private val buffer = StringBuilder()
-    private var depth = 0
-
-    /** Emits a line of code at the current indentation depth. */
-    fun line(text: String) {
-        buffer.appendLine("${"  ".repeat(depth)}$text")
-    }
-
-    /** Emits a blank line. */
-    fun blankLine() {
-        buffer.appendLine()
-    }
-
-    /** Runs [block] with the indentation depth increased by one. */
-    fun indented(block: () -> Unit) {
-        depth++
-        block()
-        depth--
-    }
-
-    override fun toString(): String = buffer.toString()
 }
