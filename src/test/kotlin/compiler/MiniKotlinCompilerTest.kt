@@ -391,6 +391,82 @@ class MiniKotlinCompilerTest {
         """))
     }
 
+    // -- Expression lifting (function calls inside expressions) ----------------
+
+    @Test
+    fun `return with function call in expression`() {
+        assertEquals("11\n", compileAndRun("""
+            fun inc(n: Int): Int {
+                return n + 1
+            }
+            fun main(): Unit {
+                var r: Int = inc(10)
+                println(r)
+            }
+        """))
+    }
+
+    @Test
+    fun `binary expression with function call on right`() {
+        assertEquals("15\n", compileAndRun("""
+            fun inc(n: Int): Int {
+                return n + 1
+            }
+            fun main(): Unit {
+                var r: Int = 10 + inc(4)
+                println(r)
+            }
+        """))
+    }
+
+    @Test
+    fun `return multiplied by function call result`() {
+        assertEquals("30\n", compileAndRun("""
+            fun triple(n: Int): Int {
+                return n + n + n
+            }
+            fun addOne(n: Int): Int {
+                return n + 1
+            }
+            fun main(): Unit {
+                var r: Int = 3 * triple(addOne(2))
+                println(r)
+            }
+        """))
+    }
+
+    @Test
+    fun `nested function call f(g(x))`() {
+        assertEquals("12\n", compileAndRun("""
+            fun addFive(n: Int): Int {
+                return n + 5
+            }
+            fun addTwo(n: Int): Int {
+                return n + 2
+            }
+            fun main(): Unit {
+                var r: Int = addFive(addTwo(5))
+                println(r)
+            }
+        """))
+    }
+
+    @Test
+    fun `two function calls in one expression`() {
+        assertEquals("9\n", compileAndRun("""
+            fun sq(n: Int): Int {
+                return n * n
+            }
+            fun cube(n: Int): Int {
+                return n * n * n
+            }
+            fun main(): Unit {
+                var r: Int = sq(2) + cube(1)
+                println(r + 4)
+            }
+        """))
+    }
+
     // -- Integration (existing) -----------------------------------------------
 
     @Test
