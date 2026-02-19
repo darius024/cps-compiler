@@ -75,6 +75,12 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
             return
         }
 
+        val ifStmt = stmt.ifStatement()
+        if (ifStmt != null) {
+            compileIf(ifStmt, rest, indent, out)
+            return
+        }
+
         val expr = stmt.expression()
         if (expr != null && expr is FunctionCallExprContext) {
             compileFunctionCallStatement(expr, rest, indent, out)
@@ -82,6 +88,38 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         }
 
         TODO("statement type: ${stmt.text}")
+    }
+
+    // -- If/else --------------------------------------------------------------
+
+    /**
+     * Both branches must eventually reach the rest of the enclosing statement
+     * list, so the rest is compiled into each branch (and the implicit empty
+     * else when no else block is present).
+     */
+    private fun compileIf(
+        ifStmt: IfStatementContext,
+        rest: List<StatementContext>,
+        indent: Int,
+        out: StringBuilder,
+    ) {
+        val pad = "  ".repeat(indent)
+        val cond = compileExpression(ifStmt.expression())
+        val blocks = ifStmt.block()
+
+        out.appendLine("${pad}if ($cond) {")
+        compileStatements(blocks[0].statement() + rest, indent + 1, out)
+        out.appendLine("${pad}}")
+
+        if (blocks.size > 1) {
+            out.appendLine("${pad}else {")
+            compileStatements(blocks[1].statement() + rest, indent + 1, out)
+            out.appendLine("${pad}}")
+        } else {
+            out.appendLine("${pad}else {")
+            compileStatements(rest, indent + 1, out)
+            out.appendLine("${pad}}")
+        }
     }
 
     // -- Function call statements ---------------------------------------------
