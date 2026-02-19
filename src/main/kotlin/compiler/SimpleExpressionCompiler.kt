@@ -11,6 +11,7 @@ internal class SimpleExpressionCompiler(
     private val isReassigned: (String) -> Boolean,
 ) {
 
+    /** Compiles an [ExpressionContext] that contains no function calls into a Java expression string. */
     fun compileExpression(expr: ExpressionContext): String = when (expr) {
         is PrimaryExprContext -> compilePrimary(expr.primary())
         is AddSubExprContext ->
@@ -37,6 +38,7 @@ internal class SimpleExpressionCompiler(
     private fun compileBinaryOperation(left: ExpressionContext, right: ExpressionContext, op: String): String =
         "(${compileExpression(left)} $op ${compileExpression(right)})"
 
+    /** Compiles a [PrimaryContext] (literal, identifier, or parenthesised expression) into a Java expression string. */
     fun compilePrimary(primary: PrimaryContext): String = when (primary) {
         is IntLiteralContext -> primary.INTEGER_LITERAL().text
         is StringLiteralContext -> primary.STRING_LITERAL().text
