@@ -124,7 +124,7 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
             stmt.expression() != null ->
                 compileExpressionStmt(stmt.expression(), rest, indent, out, onEmpty)
             else ->
-                TODO("statement type: ${stmt.text}")
+                error("unsupported statement: ${stmt.text}")
         }
     }
 
@@ -296,20 +296,17 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
             val p = expr.primary()
             p is ParenExprContext && containsFunctionCall(p.expression())
         }
-        is AddSubExprContext ->
-            containsFunctionCall(expr.expression(0)) || containsFunctionCall(expr.expression(1))
-        is MulDivExprContext ->
-            containsFunctionCall(expr.expression(0)) || containsFunctionCall(expr.expression(1))
-        is ComparisonExprContext ->
-            containsFunctionCall(expr.expression(0)) || containsFunctionCall(expr.expression(1))
-        is EqualityExprContext ->
-            containsFunctionCall(expr.expression(0)) || containsFunctionCall(expr.expression(1))
-        is AndExprContext ->
-            containsFunctionCall(expr.expression(0)) || containsFunctionCall(expr.expression(1))
-        is OrExprContext ->
-            containsFunctionCall(expr.expression(0)) || containsFunctionCall(expr.expression(1))
-        is NotExprContext ->
-            containsFunctionCall(expr.expression())
+        is NotExprContext -> containsFunctionCall(expr.expression())
+        is AddSubExprContext,
+        is MulDivExprContext,
+        is ComparisonExprContext,
+        is EqualityExprContext,
+        is AndExprContext,
+        is OrExprContext -> {
+            val children = (expr as ExpressionContext).children
+                .filterIsInstance<ExpressionContext>()
+            children.any { containsFunctionCall(it) }
+        }
         else -> false
     }
 
@@ -462,7 +459,8 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
         is AndExprContext  -> compileBinaryOp(expr.expression(0), expr.expression(1), "&&")
         is OrExprContext   -> compileBinaryOp(expr.expression(0), expr.expression(1), "||")
         is NotExprContext  -> "(!${compileExpression(expr.expression())})"
-        else -> TODO("expression type: ${expr::class.simpleName}")
+        is FunctionCallExprContext -> error("function call in simple expression context: ${expr.text}")
+        else -> error("unsupported expression: ${expr::class.simpleName}")
     }
 
     private fun compileBinaryOp(left: ExpressionContext, right: ExpressionContext, op: String): String =
@@ -477,6 +475,6 @@ class MiniKotlinCompiler : MiniKotlinBaseVisitor<String>() {
             if (isWrapped(name)) "$name[0]" else name
         }
         is ParenExprContext -> "(${compileExpression(primary.expression())})"
-        else -> TODO("primary type: ${primary::class.simpleName}")
+        else -> error("unsupported primary: ${primary::class.simpleName}")
     }
 }
